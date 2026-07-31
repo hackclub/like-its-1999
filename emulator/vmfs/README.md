@@ -18,7 +18,7 @@ parser drives two jobs:
 | `fat.js`         | `FatFs` — read-only FAT12/16/32 with VFAT long names: `readdir` / `readFile` / `walk` / `resolve`                                                     |
 | `zip.js`         | `zipTree` / `zipFiles` — packages a FatFs tree/list into a ZIP (thin wrapper over [fflate](https://github.com/101arrowz/fflate))                      |
 | `iso9660.js`     | `buildIso9660` — dependency-free ISO9660 (flat, Level 1) writer, for CDs mounted via `emulator.set_cdrom()`; see `../image-import.js`                 |
-| `extract.js`     | `openStateFs`, `exportDirZip`, `exportFilesZip` + a Node CLI                                                                                          |
+| `extract.js`     | `openStateFs`, `unwrapState` (accepts a `.99sv` container or a raw/gz state), `exportDirZip`, `exportFilesZip` + a Node CLI                           |
 | `flatten.js`     | `flattenOne`, `applyOverlayToFile` + a Node CLI                                                                                                       |
 | `filebrowser.js` | `<dialog>` file browser UI + `openLiveFs(emulator)` + `downloadDirZip` (browser)                                                                      |
 

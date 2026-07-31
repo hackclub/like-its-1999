@@ -5,13 +5,29 @@ import wasmUrl from 'v86/build/v86.wasm?url'
 import seabiosUrl from './vendor/bios/seabios.bin?url'
 import vgabiosUrl from './vendor/bios/vgabios.bin?url'
 import {
-  loadSavedState,
-  saveState,
-  clearSavedState,
-  exportState,
-  importState,
-  fetchState,
+  loadSavedSession,
+  listSavedWorlds,
+  saveSession,
+  clearSavedSession,
+  exportSession,
+  readImport,
+  storeImport,
+  fetchSharedSave,
+  StaleSaveError,
 } from './persist.js'
+import {
+  readModeParams,
+  currentWorld,
+  worldToV86Config,
+  isDevWorldId,
+} from './worlds.js'
+import {
+  planBoot,
+  planSave,
+  planImport,
+  sessionFrom,
+  applySave,
+} from './session.js'
 import { createFileBrowser, openLiveFs } from './vmfs/filebrowser.js'
 import { createCdromControl } from './cdrom-ui.js'
 import { installAtapiCdromFix } from './cdrom-atapi-fix.js'
@@ -26,35 +42,104 @@ import { installAtapiCdromFix } from './cdrom-atapi-fix.js'
 // in-memory overlay that is never written back — so D: is effectively read-only and
 // only C: writes matter for a submission.
 //
-// Base URL for these assets. Local dev serves them from /vm/ (Vite static, gitignored).
-// The images are ~1.3 GB — too big for the Vercel deploy — so in production they live
-// on object storage (Cloudflare R2). Point VITE_VM_BASE at that bucket's public URL;
-// it MUST end in a slash and the host MUST support HTTP Range requests + CORS.
-const VM = import.meta.env.VITE_VM_BASE || '/vm/'
+// Which image, and the machine config that goes with it, is a *world* (worlds.js) —
+// not module constants — because a v86 state only restores against the disks it was
+// captured on. Boot order: a shared machine, else an explicitly requested world, else
+// this build's current world (locally, a fingerprint of the images on disk).
+const params = readModeParams()
+const status = document.getElementById('status')
+const setStatus = (text) => {
+  if (status) status.textContent = text
+}
 
-// A ?share=<url> parameter turns this tab into a read-only viewer of someone else's
-// exported machine: we fetch that .bin.gz and boot from it instead of the user's own
-// session, autosave is disabled, and a manual save warns before it clobbers whatever
-// the user had saved locally. This lets a state be handed around by URL.
-const shareUrl = new URLSearchParams(location.search).get('share')
+// Identifies this restore, not this file: one saved machine can be restored many
+// times, and the tracking data has to be able to tell those apart later.
+const instanceId = crypto.randomUUID()
 
-// If the user has a saved session (IndexedDB), boot straight into it; otherwise boot
-// the shipped instant-boot snapshot. Top-level await is fine in an ES module.
-// A shared machine wins over both — but if it fails to load we fall back to normal.
-let sharedState = null
-if (shareUrl) {
+// A ?share=<url> parameter turns this tab into a viewer of someone else's exported
+// machine: we fetch it and boot it instead of the user's own session, autosave is
+// disabled, and a manual save warns before it clobbers whatever the user had saved.
+// Legacy v1 shares (a bare gzipped state, which is every link published so far) carry
+// no world, so they resolve to the legacy world and keep booting against v1 disks.
+let shared = null
+if (params.share) {
   try {
-    const s = document.getElementById('status')
-    if (s) s.textContent = 'loading shared machine…'
-    sharedState = await fetchState(shareUrl)
+    setStatus('loading shared machine…')
+    shared = await fetchSharedSave(params.share)
   } catch (e) {
     console.error('shared machine failed to load:', e)
-    alert(`Couldn't load the shared machine:\n${e.message}\n\nBooting normally.`)
+    alert(
+      `Couldn't load the shared machine:\n${e.message}\n\nBooting normally.`
+    )
   }
 }
-const isShared = !!sharedState
+const isShared = !!shared
 
-const savedState = isShared ? null : await loadSavedState()
+// The world to build the machine from. currentWorld() handles ?world= too, including
+// re-measuring a local image before honouring a dev world id.
+let world = shared?.world ?? null
+let worldNote = ''
+if (!world) {
+  try {
+    world = await currentWorld(params)
+  } catch (e) {
+    // Fall back rather than stopping, and say so in the toolbar. A modal here would
+    // block the page before the emulator even exists.
+    console.error('requested world unavailable:', e)
+    worldNote = e.message
+    params.world = null
+    world = await currentWorld(params)
+  }
+}
+
+// Gather the facts, then let session.js decide. Every combination of shared / fresh /
+// nosave / unreadable / generation is table-tested there rather than reasoned about here.
+const saved = isShared || params.fresh ? null : await loadSavedSession(world)
+const otherDevSaves =
+  !saved && isDevWorldId(world.id)
+    ? (await listSavedWorlds()).some((s) => isDevWorldId(s.worldId))
+    : false
+
+const plan = planBoot({
+  params,
+  shared,
+  saved,
+  world,
+  otherDevSaves,
+  worldNote,
+})
+const session = sessionFrom(plan)
+const bootNote = plan.note
+const bootState =
+  plan.source === 'shared'
+    ? shared.state
+    : plan.source === 'saved'
+      ? saved.state
+      : null
+
+if (plan.blocked)
+  console.warn(`refusing to write over the saved session: ${plan.blocked}`)
+if (plan.source === 'cold' && world.snapshotIsStale)
+  console.warn(
+    `${world.id}: state.bin.zst predates the disk images, ignoring it. ` +
+      'Recapture the snapshot after flattening, or keep cold booting.'
+  )
+
+// v86 wraps this buffer and reads `.buffer` off it, so hand it an ArrayBuffer that
+// covers exactly the state (a subarray view would point at the wrong bytes).
+const asArrayBuffer = (u8) =>
+  u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength
+    ? u8.buffer
+    : u8.slice().buffer
+
+// Instant boot from whatever the plan chose. v86's built-in zstd handles the shipped
+// .zst; a cold boot passes nothing and comes up from the BIOS, which is the local loop
+// for booting an image you just rebuilt.
+const initialState = bootState
+  ? { buffer: asArrayBuffer(bootState) }
+  : plan.source === 'snapshot'
+    ? world.initialState
+    : null
 
 const emulator = new V86({
   wasm_path: wasmUrl,
@@ -63,43 +148,17 @@ const emulator = new V86({
 
   screen_container: document.getElementById('screen_container'),
 
-  // Must match the values the snapshot was captured with, or restore_state fails.
-  memory_size: 128 * 1024 * 1024,
-  vga_memory_size: 32 * 1024 * 1024, // matches the VBEMP 032MB True Color driver
-
-  hda: {
-    url: VM + 'hda.img',
-    size: 314572800,
-    async: true,
-    fixed_chunk_size: 256 * 1024,
-  },
-  hdb: {
-    url: VM + 'hdb.img',
-    size: 1073741824,
-    async: true,
-    fixed_chunk_size: 256 * 1024,
-  },
-
-  // Instant boot: restore a saved session if we have one, else the shipped
-  // settled-desktop snapshot. v86's built-in zstd decompresses the shipped .zst;
-  // saved sessions come in already-decompressed as a buffer.
-  initial_state: sharedState
-    ? { buffer: sharedState }
-    : savedState
-      ? { buffer: savedState }
-      : { url: VM + 'state.bin.zst' },
+  // memory/vga sizes, the disks and COM2 all come from the world — they must match
+  // what the state was captured with or restore_state fails.
+  ...worldToV86Config(world, { initialState }),
 
   autostart: true,
 })
 
 // Minimal status wiring so it's obvious the thing is alive while it loads.
-// Once the guest is running we clear it — download-progress keeps firing for lazy
-// disk reads during normal use, so we only show it pre-start.
-const status = document.getElementById('status')
-const setStatus = (text) => {
-  if (status) status.textContent = text
-}
-
+// Once the guest is running we clear it (keeping any note about how we booted) —
+// download-progress keeps firing for lazy disk reads during normal use, so we only
+// show it pre-start.
 let running = false
 emulator.add_listener(
   'emulator-loaded',
@@ -107,7 +166,7 @@ emulator.add_listener(
 )
 emulator.add_listener('emulator-started', () => {
   running = true
-  setStatus('')
+  setStatus(bootNote)
 })
 emulator.add_listener('download-progress', (e) => {
   if (running || !e.file_name || !e.total) return
@@ -186,28 +245,54 @@ window.addEventListener('message', (e) => {
 })
 
 // --- State persistence --------------------------------------------------------
-// Save the running session (gzip-compressed) to IndexedDB, restore it on next load
-// (see the initial_state above), and export/import it as a file — the same artifact
-// we'll upload to / download from the server later.
+// Save the running session to IndexedDB as a `.99sv` container (savefile.js) keyed by
+// its world, restore it on next load (see initial_state above), and export/import it
+// as a file — the same artifact a ?share= URL points at.
 const $ = (id) => document.getElementById(id)
 const clock = () =>
   new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
+// Everything the container needs besides the RAM image. Tracking data lands here once
+// the in-guest daemon exists (see daemon/PROTOCOL.md); until then a save still carries
+// the world, the thumbnail and the provenance chain.
+//
+// The thumbnail is captured only for deliberate saves. An autosave skips it: the
+// pagehide/beforeunload path is a race against the tab closing, and rendering plus
+// PNG-encoding a frame there is exactly the wrong place to spend time (the canvas is
+// often already gone by then anyway). Skipping it is free — packSession carries the
+// previous container's thumbnail through untouched when we don't supply a new one.
+const saveOptions = async ({ withThumb = true, expectGen } = {}) => ({
+  world,
+  prior: session.prior,
+  instanceId,
+  expectGen,
+  thumb: withThumb ? await captureScreen({ maxWidth: THUMB_WIDTH }) : null,
+})
+
 let saving = false
-async function doSave(label = 'saved', { auto = false } = {}) {
-  // A shared machine (?share=) isn't the user's session to persist, so drop every
-  // autosave centrally here — the timer/visibility/pagehide/unload hooks below stay
-  // wired unconditionally and simply no-op. Manual saves still go through (guarded by
-  // their own overwrite warning on the Save button).
-  if (auto && isShared) return
-  if (saving) return
+async function doSave(label = 'saved', { auto = false, force = false } = {}) {
+  // Whether this save may happen at all is session.js's call: ?nosave, a shared machine
+  // on the autosave path, an unreadable save we must not clobber, or one already in
+  // flight. An autosave that declines says nothing, since nobody asked for it.
+  const verdict = planSave({ params, session, isShared, auto, force, saving })
+  if (!verdict.allowed) return verdict.reason && setStatus(verdict.reason)
   saving = true
   try {
-    const bytes = await saveState(emulator)
-    setStatus(`${label} ${clock()} · ${(bytes / 1e6).toFixed(1)} MB`)
+    const { size, save, gen } = await saveSession(
+      emulator,
+      await saveOptions(verdict)
+    )
+    Object.assign(session, applySave(session, { save, gen }))
+    setStatus(`${label} ${clock()} · ${(size / 1e6).toFixed(1)} MB`)
   } catch (e) {
-    setStatus('save failed')
+    if (e instanceof StaleSaveError) {
+      // Another tab owns this machine now. Silently winning would discard its work.
+      console.warn(e.message)
+      setStatus('another tab saved this machine — reload to continue here')
+      return
+    }
     console.error(e)
+    setStatus(`save failed (${e.name})`)
   } finally {
     saving = false
   }
@@ -226,18 +311,39 @@ $('save')?.addEventListener('click', () => {
     )
   )
     return
-  doSave()
+  // A save we couldn't parse is still someone's machine, so replacing it is a decision
+  // the user has to make explicitly rather than something an autosave does quietly.
+  if (
+    session.blocked &&
+    !confirm(
+      `There's a saved machine here that this version can't open:\n${session.blocked}\n\n` +
+        'Saving will replace it permanently. Continue?'
+    )
+  )
+    return
+  // Replacing an unreadable save is deliberate, so it skips the compare-and-swap. (A
+  // shared machine already boots with no generation claim, so it needs no special case.)
+  doSave('saved', { force: !!session.blocked })
 })
-$('export')?.addEventListener('click', () => exportState(emulator))
+$('export')?.addEventListener('click', async () => {
+  try {
+    const bytes = await exportSession(emulator, await saveOptions())
+    setStatus(`exported ${clock()} · ${(bytes / 1e6).toFixed(1)} MB`)
+  } catch (e) {
+    console.error(e)
+    setStatus('export failed')
+  }
+})
 
-// Screenshot: export the guest framebuffer as a PNG with every guest pixel blown up
-// to a 3×3 block (nearest-neighbour, no blur) so the pixel art reads crisply at a
-// comfortable size. screen_make_screenshot() returns an <img> already at native guest
-// resolution (graphics) or char-cell resolution (text mode); we just upscale it.
-const SHOT_SCALE = 3
-$('screenshot')?.addEventListener('click', async () => {
+// Render the guest framebuffer to a PNG. screen_make_screenshot() returns an <img>
+// already at native guest resolution (graphics) or char-cell resolution (text mode).
+// Nearest-neighbour only, both ways: Win98 is pixel art and any smoothing turns it to
+// mush. `scale` blows every guest pixel up to an N×N block for the download; `maxWidth`
+// shrinks it for the thumbnail embedded in a save.
+async function captureScreen({ scale = 1, maxWidth = 0 } = {}) {
+  if (!running) return null
   const img = emulator.screen_make_screenshot()
-  if (!img) return setStatus('screenshot unavailable')
+  if (!img) return null
   try {
     if (img.decode) await img.decode()
     else if (!img.complete)
@@ -245,35 +351,89 @@ $('screenshot')?.addEventListener('click', async () => {
         img.onload = res
         img.onerror = rej
       })
+    const factor = maxWidth ? Math.min(1, maxWidth / img.naturalWidth) : scale
     const c = document.createElement('canvas')
-    c.width = img.naturalWidth * SHOT_SCALE
-    c.height = img.naturalHeight * SHOT_SCALE
+    c.width = Math.max(1, Math.round(img.naturalWidth * factor))
+    c.height = Math.max(1, Math.round(img.naturalHeight * factor))
     const ctx = c.getContext('2d')
     ctx.imageSmoothingEnabled = false
     ctx.drawImage(img, 0, 0, c.width, c.height)
     const blob = await new Promise((res) => c.toBlob(res, 'image/png'))
-    const stamp = new Date()
-      .toISOString()
-      .slice(0, 19)
-      .replace(/[:T]/g, '-')
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `like-its-1999-${stamp}.png`
-    a.click()
-    URL.revokeObjectURL(a.href)
-    setStatus(`screenshot ${clock()}`)
+    return new Uint8Array(await blob.arrayBuffer())
   } catch (e) {
-    console.error(e)
-    setStatus('screenshot failed')
+    // A frame isn't always capturable — mid-navigation the canvas is already gone and
+    // decode() throws. Never let that break a save; a thumbnail is decoration.
+    console.debug('screen capture unavailable:', e.message)
+    return null
   }
+}
+
+const SHOT_SCALE = 3
+const THUMB_WIDTH = 320
+
+$('screenshot')?.addEventListener('click', async () => {
+  const blob = await captureScreen({ scale: SHOT_SCALE })
+  if (!blob) return setStatus('screenshot unavailable')
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `like-its-1999-${stamp}.png`
+  a.click()
+  URL.revokeObjectURL(a.href)
+  setStatus(`screenshot ${clock()}`)
 })
 $('import-btn')?.addEventListener('click', () => $('import')?.click())
 $('import')?.addEventListener('change', async (e) => {
   const file = e.target.files?.[0]
   if (!file) return
   setStatus('importing…')
-  const ok = await importState(emulator, file)
-  setStatus(ok ? `imported ${clock()}` : 'import failed (not a valid state)')
+  try {
+    // Read first, then ask. The file names its own world, which may not be the one
+    // running, so only now can we say accurately what would be replaced.
+    const imported = await readImport(file, world)
+    const verdict = planImport({ imported, params })
+    if (verdict.refuse) throw new Error(verdict.refuse)
+    if (
+      verdict.needsConfirm &&
+      !confirm(
+        `This will replace the machine saved for ${imported.world.label}` +
+          (verdict.replaces.at
+            ? `, last saved ${new Date(verdict.replaces.at).toLocaleString()}`
+            : '') +
+          '.\n\nThat cannot be undone. Continue?'
+      )
+    ) {
+      setStatus('import cancelled')
+      e.target.value = ''
+      return
+    }
+
+    // A state only restores into the machine it was captured on, so a file from another
+    // world can't be applied live: store it and reload into that world.
+    if (verdict.needsReload) {
+      await storeImport(imported)
+      setStatus(`imported a ${imported.world.label} machine — reloading…`)
+      const url = new URL(location.href)
+      url.searchParams.delete('share')
+      url.searchParams.delete('fresh')
+      url.searchParams.set('world', imported.world.id)
+      location.replace(url)
+      return
+    }
+
+    await emulator.restore_state(asArrayBuffer(imported.state))
+    Object.assign(
+      session,
+      applySave(session, {
+        save: imported.save,
+        gen: params.nosave ? null : await storeImport(imported),
+      })
+    )
+    setStatus(`imported ${clock()}`)
+  } catch (err) {
+    console.error(err)
+    setStatus(`import failed: ${err.message}`)
+  }
   e.target.value = ''
 })
 // File browser: read the disks straight from the live VM's buffers (merges the
@@ -310,11 +470,18 @@ $('browse')?.addEventListener('click', async () => {
 // sparse overlay), so a preset never gets embedded whole into every autosave.
 // URL mounts only work with the ATAPI patches below — see cdrom-atapi-fix.js.
 installAtapiCdromFix(emulator)
+// Preset discs sit next to the disks they ship with, so derive their base from the
+// world rather than a module constant. Any disk will do: a world is only required to
+// have one, and it needn't be hda.
+const assetBase = (Object.values(world.disks)[0]?.url ?? '/vm/').replace(
+  /[^/]*$/,
+  ''
+)
 const PRESETS = [
   {
     id: 'win98se',
     label: 'Windows 98 Second Edition (E:\\win98)',
-    url: VM + 'presets/win98se.iso',
+    url: assetBase + 'presets/win98se.iso',
     size: 655591424,
   },
 ]
@@ -350,8 +517,10 @@ $('reboot')?.addEventListener('click', () => {
 $('reset')?.addEventListener('click', async () => {
   if (!confirm('Discard your saved session and reset to the clean image?'))
     return
-  await clearSavedState()
-  location.reload()
+  await clearSavedSession(world)
+  const url = new URL(location.href)
+  url.searchParams.delete('share')
+  location.replace(url)
 })
 
 // Autosave periodically and when the tab is hidden (best-effort before close).
@@ -387,11 +556,14 @@ const topWin = (() => {
     return window
   }
 })()
+// Warn only. The visibilitychange handler above has already fired by this point, so a
+// second save here would just race the first (the in-flight one wins and this one is
+// dropped) while making the teardown path slower.
 topWin.addEventListener('beforeunload', (e) => {
-  doSave('autosaved', { auto: true })
   e.preventDefault()
   e.returnValue = ''
 })
 
 // Expose for poking around in the console during development.
 window.emulator = emulator
+window.like99 = { world, params, instanceId, save: () => doSave('saved') }

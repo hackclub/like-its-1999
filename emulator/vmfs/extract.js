@@ -12,16 +12,25 @@
 // bottom drives the Node case.
 
 import { parseState, maybeGunzip } from './state.js'
+import { detectFormat, readSaveFile } from '../savefile.js'
 import { OverlayBlockDevice } from './blockdev.js'
 import { FatFs } from './fat.js'
 import { zipTree, zipFiles } from './zip.js'
+
+// Accept any shape a saved machine comes in: a `.99sv` container, or the raw/gzipped
+// v86 state that every v1 save and published share link is.
+export async function unwrapState(bytes) {
+  if (detectFormat(bytes) === 'container')
+    return (await readSaveFile(bytes)).state()
+  return maybeGunzip(bytes)
+}
 
 // Mount a FAT filesystem from a state's disk overlay painted over a base image.
 // If overlayIndex is omitted we try each overlay and keep the one that yields a
 // filesystem where a probe path resolves (default probe: '/WINDOWS', which exists on
 // the C: image). Returns { fs, dev, overlayIndex, overlays }.
 export async function openStateFs(stateBytes, baseSource, opts = {}) {
-  const raw = await maybeGunzip(stateBytes)
+  const raw = await unwrapState(stateBytes)
   const { overlays, blockSize } = parseState(raw)
   if (!overlays.length) throw new Error('state contains no disk overlays')
 
@@ -67,7 +76,7 @@ export async function exportFilesZip(fs, paths, opts = {}) {
 //   zip     <state> <base> <path> <out.zip>    export a directory as a zip
 //   find    <state> <base> <name> [startPath]  find entries by (case-insensitive) name
 //
-// <state> is a raw or gzipped v86 state file. <base> is the matching base disk image
+// <state> is a .99sv save container or a raw/gzipped v86 state. <base> is the base disk image
 // (e.g. public/vm/hda.img) — only the ranges needed are read from it.
 // ---------------------------------------------------------------------------------
 

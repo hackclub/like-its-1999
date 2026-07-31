@@ -4,7 +4,8 @@
     "fetch-image": "bash scripts/fetch-image.sh",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test --test-timeout=15000 emulator/*.test.mjs"
   },
   "keywords": [],
   "author": "",
@@ -18,5 +19,8 @@
     "omggif": "^1.0.10",
     "v86": "^0.5.424",
     "vite": "^8.1.3"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
   }
 }
