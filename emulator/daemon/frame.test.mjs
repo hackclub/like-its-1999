@@ -220,6 +220,41 @@ test('the streaming decoder survives a mid-frame restore', () => {
   assert.ok(dec.droppedBytes > 0)
 })
 
+test('a stale header claiming a huge length does not swallow later frames', () => {
+  // The restore hazard that matters most, and the one the old decoder failed: a snapshot
+  // leaves a plausible header in the UART declaring 64 KB, so every frame behind it became
+  // "payload" until that much traffic had arrived. On a link whose only traffic is an
+  // announce every two seconds, the guest would have been deaf for minutes.
+  const stale = new Uint8Array(HEADER_SIZE)
+  stale.set(SYNC, 0)
+  stale[2] = TYPES.IDENT
+  new DataView(stale.buffer).setUint32(4, MAX_PAYLOAD, true)
+
+  const real = encode(TYPES.ANNOUNCE, ['e1', '1', 'abc'])
+  const { frames, dropped } = decode(new Uint8Array([...stale, ...real]))
+  assert.equal(frames.length, 1, 'the real frame came through immediately')
+  assert.equal(frames[0].type, TYPES.ANNOUNCE)
+  assert.ok(dropped >= stale.length)
+
+  // Same through the streaming decoder, arriving in separate reads.
+  const dec = createDecoder()
+  assert.deepEqual(dec.push(stale), [])
+  const got = dec.push(real)
+  assert.equal(got.length, 1)
+  assert.equal(got[0].type, TYPES.ANNOUNCE)
+})
+
+test('a genuinely incomplete frame is still waited for', () => {
+  // The other half of the rule: when nothing later is provably a frame, the candidate is
+  // kept, because a frame arriving in pieces is the normal case.
+  const frame = encode(TYPES.EVENT, ['win', 'EDITPLUS.EXE'])
+  const cut = frame.length - 4
+  const { frames, rest, dropped } = decode(frame.subarray(0, cut))
+  assert.equal(frames.length, 0)
+  assert.equal(rest.length, cut, 'the partial frame is retained in full')
+  assert.equal(dropped, 0, 'and nothing was counted as garbage')
+})
+
 test('the streaming decoder refuses to grow without bound on garbage', () => {
   const dec = createDecoder({ maxBuffer: 1024 })
   // A sync word followed by a plausible length, then never enough bytes.

@@ -1,5 +1,5 @@
 // The `.99sv` save container: a v86 state plus everything else a saved machine needs
-// to carry (which world it belongs to, time-tracking data, a thumbnail, provenance).
+// to carry (which world it belongs to, time-tracking data, a thumbnail).
 //
 // Why a container at all: a v86 state only restores against the exact disk bytes and
 // machine config it was captured with, and a bare state records neither. Rebuild the
@@ -38,6 +38,10 @@
 //   - unknown chunks are preserved verbatim on rewrite (see storedChunk + pack's
 //     `stored` input), so an older build never strips data a newer one wrote
 // Only a breaking layout change bumps the container version.
+//
+// Command-line tooling for these files lives in `scripts/savefile-cli.mjs`, deliberately
+// not here: this module ships to a browser, and a Node CLI inside it made every production
+// build externalize node:fs/promises.
 //
 // This module is world-agnostic on purpose: it never resolves URLs or decides what a
 // world id means (see worlds.js). A legacy artifact (bare gzipped or raw v86 state,
@@ -375,7 +379,7 @@ export async function packSaveFile({ meta = {}, chunks = [] }) {
 
   // Spread first, then fill gaps: defaults written before the spread would be silently
   // undone by an explicit `id: null` or `createdAt: undefined`, which is how a file
-  // loses its identity (and its provenance chain) on a later save.
+  // loses its identity on a later save.
   const metaObject = { ...meta, chunks: table }
   if (!metaObject.id) metaObject.id = randomId()
   if (!Number.isFinite(metaObject.createdAt)) metaObject.createdAt = Date.now()
@@ -451,119 +455,4 @@ export async function probeSaveFileMeta(url, opts = {}) {
   if (HEADER_SIZE + metaLen > prefix.length)
     prefix = await readPrefix(align4(HEADER_SIZE + metaLen))
   return readContainerMeta(prefix)
-}
-
-// ---------------------------------------------------------------------------------
-// Node CLI:  node savefile.js <command> [args]
-//
-//   info    <file|url>                 header, world, chunk table, tracking summary
-//   extract <file> <chunkId> <out>     write one decoded chunk
-//   state   <file> <out>               shorthand for `extract <file> state <out>`
-//
-// <file> may be a .99sv container or a legacy raw/gzipped v86 state, so this works on
-// submissions from either era. `info` also takes an http(s) URL, which reads only the
-// metadata over Range — the point being you can review a submitted machine's world and
-// tracked hours without pulling tens of megabytes.
-// ---------------------------------------------------------------------------------
-
-const isMain =
-  typeof process !== 'undefined' &&
-  process.argv[1] &&
-  import.meta.url === `file://${process.argv[1]}`
-
-if (isMain) {
-  const fsp = await import('node:fs/promises')
-  const [cmd, file, ...rest] = process.argv.slice(2)
-  const usage = `usage:
-  node savefile.js info    <file|url>
-  node savefile.js extract <file> <chunkId> <out>
-  node savefile.js state   <file> <out>`
-
-  if (!cmd || !file) {
-    console.error(usage)
-    process.exit(1)
-  }
-
-  if (cmd === 'info' && /^https?:\/\//.test(file)) {
-    const probed = await probeSaveFileMeta(file)
-    if (!probed) {
-      console.log('format:     legacy v1 artifact (no container metadata)')
-      process.exit(0)
-    }
-    console.log(`format:     container v${probed.version}`)
-    console.log(`total size: ${(probed.totalLength / 1024).toFixed(0)} KiB`)
-    console.log(`world:      ${probed.meta.world?.id ?? '(none)'}`)
-    console.log(
-      `chunks:     ${probed.chunks.map((c) => `${c.id} (${c.length}B)`).join(', ')}`
-    )
-    if (probed.meta.tracking)
-      console.log(
-        `tracking:   ${probed.meta.tracking.totalActiveMs ?? 0} ms active`
-      )
-    process.exit(0)
-  }
-
-  const bytes = new Uint8Array(await fsp.readFile(file))
-  const save = await readSaveFile(bytes)
-
-  if (cmd === 'info') {
-    const kb = (n) => `${(n / 1024).toFixed(0)} KiB`
-    console.log(
-      `format:     ${save.format}${save.legacy ? ' (legacy v1)' : ''}`
-    )
-    console.log(`file size:  ${kb(bytes.length)}`)
-    if (save.legacy) {
-      const raw = await save.state()
-      console.log(`state:      ${kb(raw.length)} decompressed`)
-      console.log('world:      (none recorded — treated as the legacy world)')
-    } else {
-      const m = save.meta
-      console.log(`id:         ${m.id ?? '(none)'}`)
-      console.log(
-        `created:    ${m.createdAt ? new Date(m.createdAt).toISOString() : '(none)'}`
-      )
-      const w = m.world
-      console.log(
-        `world:      ${typeof w === 'string' ? w : (w?.id ?? '(none)')}`
-      )
-      if (w && typeof w === 'object') {
-        if (w.memory) console.log(`  memory:   ${w.memory / 1048576} MiB`)
-        if (w.vgaMemory) console.log(`  vga:      ${w.vgaMemory / 1048576} MiB`)
-        if (w.uart1 != null) console.log(`  uart1:    ${w.uart1}`)
-        for (const [k, d] of Object.entries(w.disks || {}))
-          console.log(`  ${k}:      ${d.url} (${d.size} bytes)`)
-      }
-      if (m.tracking)
-        console.log(
-          `tracking:   ${m.tracking.totalActiveMs ?? 0} ms active · ` +
-            `${m.tracking.sessions ?? 0} session(s) · ` +
-            `${m.tracking.attestations?.length ?? 0} attestation(s)`
-        )
-      if (m.provenance?.length)
-        console.log(`provenance: ${m.provenance.length} entr(ies)`)
-      console.log('chunks:')
-      for (const c of save.chunks)
-        console.log(
-          `  ${c.id.padEnd(12)} ${String(c.length).padStart(10)} stored  ` +
-            `${String(c.size ?? '?').padStart(10)} raw  ${c.codec || 'raw'}`
-        )
-    }
-  } else if (cmd === 'extract' || cmd === 'state') {
-    const id = cmd === 'state' ? 'state' : rest[0]
-    const out = cmd === 'state' ? rest[0] : rest[1]
-    if (!id || !out) {
-      console.error(usage)
-      process.exit(1)
-    }
-    const data = await save.chunk(id)
-    if (!data) {
-      console.error(`no chunk "${id}" (have: ${save.chunkIds.join(', ')})`)
-      process.exit(1)
-    }
-    await fsp.writeFile(out, data)
-    console.error(`wrote ${out} (${data.length} bytes)`)
-  } else {
-    console.error(usage)
-    process.exit(1)
-  }
 }

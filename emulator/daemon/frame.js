@@ -162,6 +162,10 @@ export function decode(buffer) {
   const frames = []
   let at = 0
   let dropped = 0
+  // Where an incomplete-but-plausible candidate started, and what `dropped` was then, so
+  // that deciding to wait for it can be unwound. See the incomplete branch below.
+  let stalled = -1
+  let stalledDropped = 0
 
   while (at + HEADER_SIZE <= bytes.length) {
     if (bytes[at] !== SYNC0 || bytes[at + 1] !== SYNC1) {
@@ -180,7 +184,22 @@ export function decode(buffer) {
       continue
     }
     const end = at + HEADER_SIZE + len + TRAILER_SIZE
-    if (end > bytes.length) break // genuinely incomplete: wait for more
+    if (end > bytes.length) {
+      // Incomplete, but not necessarily real. A snapshot restore can leave a stale header
+      // in the UART declaring a huge length, and simply waiting for it swallows every
+      // frame that follows until tens of kilobytes have arrived — minutes of announcements
+      // on an idle link, with nothing getting through. So keep scanning past it: if
+      // anything later proves to be a complete CRC-valid frame, this candidate was noise.
+      // If nothing does, the position is restored below and we wait, because then it may
+      // well be genuine.
+      if (stalled < 0) {
+        stalled = at
+        stalledDropped = dropped
+      }
+      at++
+      dropped++
+      continue
+    }
 
     const want = view.getUint32(at + HEADER_SIZE + len, true)
     if (crc32(bytes, at + 2, at + HEADER_SIZE + len) !== want) {
@@ -188,11 +207,18 @@ export function decode(buffer) {
       dropped++
       continue
     }
+    // A real frame after a stalled candidate proves the candidate was noise.
+    stalled = -1
     frames.push({
       type,
       payload: bytes.subarray(at + HEADER_SIZE, at + HEADER_SIZE + len),
     })
     at = end
+  }
+
+  if (stalled >= 0) {
+    at = stalled
+    dropped = stalledDropped
   }
 
   return { frames, rest: bytes.subarray(at), dropped }

@@ -19,6 +19,15 @@ export const TICK_MS = 1000
 // a jiggler would make it meaningless.
 const isKeyDown = (code) => code !== 0xe0 && (code & 0x80) === 0
 
+// `mouse-click` carries the state of [left, middle, right] and is sent on both press and
+// release — and again as all-false when the pointer leaves the canvas. Counting every event
+// therefore counted every click at least twice. Only a button going down is a click.
+function countPresses(previous, next) {
+  let presses = 0
+  for (let i = 0; i < 3; i++) if (next[i] && !previous[i]) presses++
+  return presses
+}
+
 export function createLink({
   emulator,
   epoch,
@@ -53,12 +62,8 @@ export function createLink({
         if (ev.state === 'ready') primeForeground()
         onState(ev.state, agent)
       } else if (ev.type === 'event' && ev.name === 'win') {
-        const [exe, win, tick] = ev.data
-        log.onWindow(
-          trackingLog,
-          { exe, win, tick: Number(tick) || null },
-          now()
-        )
+        const [exe, win] = ev.data
+        log.onWindow(trackingLog, { exe, win }, now())
         onEvent(ev)
       } else if (ev.type === 'reply') {
         const w = waiting.get(ev.id)
@@ -87,8 +92,7 @@ export function createLink({
     if (!c) return
     send([c.frame])
     waiting.set(c.id, {
-      resolve: ([exe, win]) =>
-        log.onWindow(trackingLog, { exe, win, tick: null }, now()),
+      resolve: ([exe, win]) => log.onWindow(trackingLog, { exe, win }, now()),
       reject: () => {},
     })
   }
@@ -122,7 +126,17 @@ export function createLink({
       (c) => isKeyDown(c) && input({ keys: 1 }),
       null
     )
-    pair.register('mouse-click', () => input({ clicks: 1 }), null)
+    let buttons = [false, false, false]
+    pair.register(
+      'mouse-click',
+      (data) => {
+        const next = [!!data?.[0], !!data?.[1], !!data?.[2]]
+        const presses = countPresses(buttons, next)
+        buttons = next
+        if (presses) input({ clicks: presses })
+      },
+      null
+    )
     pair.register('mouse-wheel', () => input({ wheel: 1 }), null)
   } else {
     // The internal shape changed under us: say so rather than record zero forever.

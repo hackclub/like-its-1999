@@ -12,12 +12,15 @@
 import { readFile } from 'node:fs/promises'
 import { createPublicKey, verify as nodeVerify, createHash } from 'node:crypto'
 
+import { signedMessage } from '../api/signed-message.mjs'
+
 import { readSaveFile } from '../emulator/savefile.js'
 import { unseal, importPrivateKey } from '../emulator/daemon/sealed.js'
 import { fromNdjson } from '../emulator/daemon/tracking.js'
 
 // Committed counterpart of HB_SIGN_KEY (see scripts/hb-keys.mjs).
-const SIGN_PUBLIC_KEY_B64 = ''
+const SIGN_PUBLIC_KEY_B64 =
+  'MCowBQYDK2VwAyEAhMtVECEzetNtvcFBcSW97FmikEwHU7zQEYBYrdXDdm4='
 
 const [file, ...flags] = process.argv.slice(2)
 const asJson = flags.includes('--json')
@@ -43,7 +46,7 @@ function verifySignature(entry, body) {
   if (!SIGN_PUBLIC_KEY_B64) return 'cannot check (no public key committed yet)'
   const sha256 = createHash('sha256').update(body).digest('hex')
   const message = Buffer.from(
-    `${entry.sigKeyId || 'hb1'}|${sha256}|${entry.signedAt}`,
+    signedMessage(entry.sigKeyId, sha256, entry.signedAt),
     'utf8'
   )
   const key = createPublicKey({
@@ -76,7 +79,7 @@ for (const entry of logs) {
 
   let lines
   try {
-    const plain = await unseal({ header: entry.seal, body }, priv)
+    const plain = await unseal({ seal: entry.seal, body }, priv)
     lines = fromNdjson(new TextDecoder().decode(await gunzip(plain)))
   } catch (e) {
     console.error(`could not open: ${e.message}`)

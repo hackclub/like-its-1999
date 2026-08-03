@@ -17,3 +17,9 @@ public/vm/
 
 # Host-only C test binaries (the guest ones in emulator/daemon/bin/ are committed)
 emulator/daemon/build/
+
+# Secrets and local tooling state. .env holds HB_SIGN_KEY (the same signing key as
+# production, so /api/sign works under `npm run dev`); .env.local is written by
+# `vercel env pull`. The sealing private key lives in tmp-hb-keys.json, matched by tmp*.
+.env*
+.vercel

@@ -75,16 +75,31 @@ build_guest() {
   ls -l "$BIN"
 }
 
+# Randomised decoder testing under ASAN. The parent's central claim is that no input can
+# crash it or make it read outside its own buffer, and this is the only thing here that tests
+# that claim rather than restating it (verified against planted bugs: a missing CRC check and
+# an out-of-bounds read were both caught). Apple's clang ships no libFuzzer, so the driver in
+# fuzz_frame.c mutates real frames itself; the seed is printed and replays exactly.
+run_fuzz() {
+  echo "fuzz: clang -fsanitize=address -> $BUILD"
+  clang -O1 -g -fsanitize=address -fno-omit-frame-pointer -I"$SRC" \
+    -o "$BUILD/fuzz_frame" "$SRC/frame.c" "$SRC/fuzz_frame.c"
+  "$BUILD/fuzz_frame" "${1:-20000}" ${2:+"$2"}
+}
+
 case "${1:-all}" in
 host) build_host ;;
+fuzz) run_fuzz "${2:-20000}" "${3:-}" ;;
 guest) build_guest ;;
 test)
   build_host
   run_tests
+  run_fuzz 20000
   ;;
 all)
   build_host
   run_tests
+  run_fuzz 20000
   build_guest
   ;;
 *)

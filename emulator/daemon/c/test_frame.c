@@ -196,6 +196,51 @@ static void test_decode_hazards(void) {
 /* A single read can carry more than the buffer holds. The decoder must accept what fits,
  * say how much it took, and lose nothing — the first version silently discarded the
  * overflow, which ate whole frames and was caught by the cross-language golden test. */
+/* The restore hazard: a stale header declaring a huge length must not swallow the frames
+ * behind it. This is the C half of the same rule as frame.js. */
+static void test_stale_header_resync(void) {
+  static u8 wire[F_MAX_FRAME];
+  static u8 buf[F_MAX_FRAME];
+  static f_decoder d;
+  u8 payload[64];
+  f_builder b;
+  f_frame out;
+  int plen, wlen, n = 0;
+
+  printf("stale header resync\n");
+  f_build_init(&b, payload, sizeof payload);
+  f_add_str(&b, "e1");
+  f_add_str(&b, "1");
+  plen = f_build_len(&b);
+  wlen = f_encode(F_ANNOUNCE, payload, plen, wire, sizeof wire);
+
+  /* sync, a valid type, zero flags, and a length of 64 KiB that will never arrive. */
+  buf[n++] = F_SYNC0;
+  buf[n++] = F_SYNC1;
+  buf[n++] = F_IDENT;
+  buf[n++] = 0;
+  buf[n++] = 0x00;
+  buf[n++] = 0x00;
+  buf[n++] = 0x01;
+  buf[n++] = 0x00;
+  memcpy(buf + n, wire, wlen);
+  n += wlen;
+
+  f_dec_init(&d);
+  ok(f_dec_push(&d, buf, n) == n, "the whole read was accepted");
+  ok(f_dec_next(&d, &out) == 1, "the real frame came through immediately");
+  eq_int(out.type, F_ANNOUNCE, "and it is the announce, not the stale candidate");
+  ok(d.dropped >= 8, "the stale header was counted as dropped");
+
+  /* And the other half of the rule: a frame genuinely arriving in pieces is waited for. */
+  f_dec_init(&d);
+  f_dec_push(&d, wire, wlen - 3);
+  ok(f_dec_next(&d, &out) == 0, "an incomplete frame yields nothing yet");
+  eq_int((long)d.dropped, 0, "and is not treated as garbage");
+  f_dec_push(&d, wire + wlen - 3, 3);
+  ok(f_dec_next(&d, &out) == 1, "it completes on the next read");
+}
+
 static void test_push_more_than_fits(void) {
   static u8 wire[F_MAX_FRAME * 3];
   static f_decoder d;
@@ -259,6 +304,19 @@ static void test_fields(void) {
   u32 v;
 
   printf("fields\n");
+  /* Integer parsing is a length check in disguise, so overflow must be refused rather than
+   * wrapped. 4294967296 used to be accepted as a perfectly good zero. */
+  {
+    f_field f;
+    u32 v = 12345;
+    f.p = (const u8 *)"4294967296";
+    f.len = 10;
+    ok(f_field_uint(&f, &v) == 0, "an overflowing integer is refused");
+    eq_int((long)v, 12345, "and the output is left alone");
+    f.p = (const u8 *)"4294967295";
+    ok(f_field_uint(&f, &v) == 1, "the largest u32 is still accepted");
+    eq_int((long)v, 4294967295UL, "with the right value");
+  }
   /* Malformed lists decode to -1 rather than a guess. */
   {
     u8 bad1[] = {3, 0, 0};       /* claims 3 fields, has 1 */
@@ -319,6 +377,7 @@ int main(void) {
   test_crc();
   test_roundtrip();
   test_decode_hazards();
+  test_stale_header_resync();
   test_push_more_than_fits();
   test_fields();
   printf("%s: %d checks, %d failures\n", failures ? "FAIL" : "ok", checks, failures);

@@ -24,6 +24,10 @@ static int set_nonblock(int fd) {
 }
 
 int p_serial_open(void) {
+  /* A write to a pipe whose reader has gone raises SIGPIPE, whose default action kills the
+   * process. The parent is the one thing here that must not die, and it writes to a child
+   * that is allowed to; the error is handled through EPIPE instead. */
+  signal(SIGPIPE, SIG_IGN);
   /* stdout must stay unbuffered and binary; we never use stdio for it. */
   if (set_nonblock(STDIN_FILENO) != P_OK) return P_FAIL;
   return P_OK;
@@ -57,6 +61,7 @@ void p_child_init(p_child *c) {
   c->to_in = 0;
   c->from_out = 0;
   c->running = 0;
+  c->nonblocking = 0;
 }
 
 /* Handles are stored as (fd + 1) so that zero always means "none". */
@@ -100,6 +105,9 @@ int p_child_spawn(p_child *c, const char *path, const char *arg) {
   close(in[0]);
   close(out[1]);
   set_nonblock(out[0]);
+  /* Same reasoning as the Win32 build: a child that stops reading must not be able to park
+   * the parent inside a write. */
+  c->nonblocking = set_nonblock(in[1]) == P_OK;
   c->proc = (void *)(long)pid;
   c->to_in = as_handle(in[1]);
   c->from_out = as_handle(out[0]);
@@ -143,14 +151,22 @@ int p_child_read(p_child *c, u8 *buf, int max) {
 
 int p_child_write(p_child *c, const u8 *buf, int len) {
   int at = 0;
+  u32 deadline;
   if (!c->running || !c->to_in) return P_FAIL;
+  deadline = p_ticks() + P_CHILD_WRITE_MS;
   while (at < len) {
     ssize_t n = write(fd_of(c->to_in), buf + at, (size_t)(len - at));
     if (n > 0) {
       at += (int)n;
       continue;
     }
-    if (n < 0 && (errno == EAGAIN || errno == EINTR)) continue;
+    if (n < 0 && errno == EINTR) continue;
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      /* The child is behind rather than gone. Wait, but not forever. */
+      if ((u32)(p_ticks() - deadline) < 0x80000000UL) return P_FAIL;
+      usleep(5000);
+      continue;
+    }
     return P_FAIL; /* the child died mid-write; the supervisor will notice */
   }
   return P_OK;

@@ -171,6 +171,7 @@ void p_child_init(p_child *c) {
   c->to_in = NULL;
   c->from_out = NULL;
   c->running = 0;
+  c->nonblocking = 0;
 }
 
 /* A pipe end the child must not inherit. SetHandleInformation would be the modern way and
@@ -206,6 +207,15 @@ int p_child_spawn(p_child *c, const char *path, const char *arg) {
   }
   in_w = uninheritable(in_w);
   out_r = uninheritable(out_r);
+
+  /* Refuse to block when the child stops reading. PIPE_NOWAIT is the legacy LAN Manager
+   * mode and is exactly what it is good for here: WriteFile then returns immediately,
+   * having written what fit. If 9x declines it we remember that, and parent.c refuses to
+   * forward to a child that has stopped proving it is alive. */
+  {
+    DWORD mode = PIPE_NOWAIT;
+    c->nonblocking = SetNamedPipeHandleState(in_w, &mode, NULL, NULL) ? 1 : 0;
+  }
 
   for (i = 0; path[i] && n < (int)sizeof cmd - 2; i++) cmd[n++] = path[i];
   if (arg) {
@@ -281,13 +291,19 @@ int p_child_read(p_child *c, u8 *buf, int max) {
 
 int p_child_write(p_child *c, const u8 *buf, int len) {
   int at = 0;
+  u32 deadline;
   if (!c->running || !c->to_in) return P_FAIL;
+  deadline = p_ticks() + P_CHILD_WRITE_MS;
   while (at < len) {
     DWORD wrote = 0;
     if (!WriteFile((HANDLE)c->to_in, buf + at, (DWORD)(len - at), &wrote, NULL))
       return P_FAIL;
-    if (wrote == 0) return P_FAIL;
     at += (int)wrote;
+    if (at >= len) break;
+    /* In PIPE_NOWAIT mode a full pipe is a successful write of zero bytes, so this is the
+     * ordinary "child is behind" path rather than an error. */
+    if ((u32)(p_ticks() - deadline) < 0x80000000UL) return P_FAIL;
+    Sleep(5);
   }
   return P_OK;
 }

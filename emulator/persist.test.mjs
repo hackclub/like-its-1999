@@ -18,7 +18,7 @@ import {
   readImport,
   storeImport,
   StaleSaveError,
-  MAX_SLOTS,
+  MAX_DEV_SLOTS,
 } from './persist.js'
 import { packSaveFile, readSaveFile } from './savefile.js'
 import { WORLDS, LEGACY_WORLD_ID } from './worlds.js'
@@ -187,19 +187,24 @@ test('expectGen null overwrites deliberately', async () => {
   assert.equal(forced.gen, 2)
 })
 
-test('a save with no expectGen still verifies the slot is empty', async () => {
-  await saveSession(fakeEmulator(), opts(legacyWorld))
-  // opts() omits expectGen entirely -> undefined -> treated as "no claim", so this is
-  // the one shape that is allowed to pass unchecked. Documenting it rather than asserting
-  // a wrong behaviour: main.js always supplies a value from planSave.
-  const again = await saveSession(fakeEmulator(), opts(legacyWorld))
-  assert.equal(again.gen, 2)
+test('a save with no expectGen verifies the slot is empty, and refuses if it is not', async () => {
+  // opts() omits expectGen entirely. Undefined means "I never looked", which is a claim
+  // that nothing is stored — so the first save works and the second is refused, rather
+  // than a forgotten argument silently destroying someone's machine.
+  const first = await saveSession(fakeEmulator(), opts(legacyWorld))
+  assert.equal(first.gen, 1)
+  await assert.rejects(
+    () => saveSession(fakeEmulator(), opts(legacyWorld)),
+    StaleSaveError
+  )
+  const still = await raw(`world:${legacyWorld.id}`)
+  assert.equal(still.gen, 1, 'and the stored machine was left alone')
 })
 
 // --- pruning ---------------------------------------------------------------------
 
 test('pruning keeps the newest slots and deletes the records, not just the index', async () => {
-  const keep = MAX_SLOTS
+  const keep = MAX_DEV_SLOTS
   for (let i = 0; i < keep + 2; i++) {
     await saveSession(fakeEmulator(), opts(devWorld(`dev:world${i}`)))
     // Distinct timestamps so "newest" is well defined.
@@ -219,6 +224,28 @@ test('pruning keeps the newest slots and deletes the records, not just the index
   assert.ok(!keys.includes('world:dev:world0'))
 })
 
+test('pruning never touches a registered world, however many dev builds arrive', async () => {
+  // The dangerous version of this was recency across everything: three local rebuilds and
+  // a participant's real machine was gone to make room for a dev image.
+  await saveSession(fakeEmulator(), opts(legacyWorld))
+  for (let i = 0; i < MAX_DEV_SLOTS + 3; i++) {
+    await saveSession(fakeEmulator(), opts(devWorld(`dev:churn${i}`)))
+    await new Promise((r) => setTimeout(r, 2))
+  }
+  const index = await raw('index')
+  assert.ok(index.has(legacyWorld.id), 'the registered machine is still listed')
+  const keys = (await rawKeys()).filter((k) => String(k).startsWith('world:'))
+  assert.ok(
+    keys.includes(`world:${legacyWorld.id}`),
+    'and its record still exists'
+  )
+  assert.equal(
+    keys.filter((k) => String(k).includes('dev:')).length,
+    MAX_DEV_SLOTS,
+    'while the dev slots were capped'
+  )
+})
+
 test('pruning reclaims a slot record the index never knew about', async () => {
   // Writes are single-transaction now, so this shouldn't arise — but a record with no
   // index entry would otherwise be invisible and unreclaimable forever.
@@ -229,7 +256,7 @@ test('pruning reclaims a slot record the index never knew about', async () => {
     at: 0,
     gen: 1,
   })
-  for (let i = 0; i < MAX_SLOTS; i++) {
+  for (let i = 0; i < MAX_DEV_SLOTS; i++) {
     await saveSession(fakeEmulator(), opts(devWorld(`dev:live${i}`)))
     await new Promise((r) => setTimeout(r, 2))
   }
@@ -406,27 +433,6 @@ test('each instance writes its own tracking chunk and never rewrites another', a
   assert.deepEqual(await two.save.chunk('hb/i-B'), te.encode('log B'))
 })
 
-test('provenance gains one entry per restore, not per save', async () => {
-  const a = await saveSession(fakeEmulator(), opts(legacyWorld))
-  assert.equal(a.save.meta.provenance.length, 1)
-  const b = await saveSession(
-    fakeEmulator(),
-    opts(legacyWorld, { prior: a.save, expectGen: a.gen })
-  )
-  assert.equal(b.save.meta.provenance.length, 1, 'same instance, same entry')
-
-  const c = await saveSession(
-    fakeEmulator(),
-    opts(legacyWorld, {
-      prior: b.save,
-      expectGen: b.gen,
-      instanceId: 'instance-2',
-    })
-  )
-  assert.equal(c.save.meta.provenance.length, 2)
-  assert.equal(c.save.meta.provenance[1].parent, 'instance-1')
-})
-
 // --- import ----------------------------------------------------------------------
 
 const fileOf = (bytes) => ({ arrayBuffer: async () => bytes.buffer ?? bytes })
@@ -487,4 +493,33 @@ test('an import naming a disallowed disk is refused', async () => {
     /not allowed/
   )
   assert.equal(await raw('world:win98-evil-v1'), undefined)
+})
+
+test('an import refuses to overwrite a machine saved after it was read', async () => {
+  // The window between "this replaces the machine last saved at 4pm, continue?" and the
+  // click. Consent covers the machine the user was told about, not a newer one that
+  // arrived while they were reading the dialog.
+  const first = await saveSession(fakeEmulator(), opts(legacyWorld))
+  const bytes = await packSaveFile({
+    meta: { world: { id: legacyWorld.id } },
+    chunks: [{ id: 'state', bytes: fakeState(4096) }],
+  })
+  const imported = await readImport(fileOf(bytes), legacyWorld)
+  assert.equal(
+    imported.gen,
+    first.gen,
+    'it read the generation it would replace'
+  )
+
+  // Another tab saves in between.
+  await saveSession(
+    fakeEmulator(),
+    opts(legacyWorld, { prior: first.save, expectGen: first.gen })
+  )
+  await assert.rejects(() => storeImport(imported), StaleSaveError)
+  assert.equal(
+    (await raw(`world:${legacyWorld.id}`)).gen,
+    2,
+    'and the newer machine is untouched'
+  )
 })

@@ -21,17 +21,24 @@ import {
   EXTENSION,
   UnsupportedSaveError,
 } from './savefile.js'
-import { resolveWorld, worldDescriptor, LEGACY_WORLD_ID } from './worlds.js'
+import {
+  resolveWorld,
+  worldDescriptor,
+  verifyDiskSizes,
+  isDevWorldId,
+  LEGACY_WORLD_ID,
+} from './worlds.js'
 
 const DB_NAME = 'like-its-99'
 const DB_VERSION = 2
 const STORE = 'vm'
 const INDEX_KEY = 'index'
-const LEGACY_KEY = 'state' // the pre-container single slot
-const LEGACY_IMAGE_ID = LEGACY_WORLD_ID // what that slot was tagged with
+const LEGACY_KEY = 'state' // the pre-container single slot, tagged with the v1 world id
 
-// How many world slots to keep. Rebuild-heavy dev sessions would otherwise pile up.
-export const MAX_SLOTS = 3
+// How many *local rebuild* worlds to keep. A dev session regenerates these constantly and
+// each is tens of megabytes; registered worlds are never pruned, because one of those is a
+// participant's machine and nothing here is entitled to decide it is stale.
+export const MAX_DEV_SLOTS = 3
 
 const slotKey = (worldId) => `world:${worldId}`
 
@@ -136,6 +143,9 @@ export async function listSavedWorlds() {
       worldId,
       at: meta?.at ?? 0,
       label: meta?.label || worldId,
+      // The generation as of that write, so an import can compare-and-swap without
+      // loading the multi-megabyte record just to read one number.
+      gen: meta?.gen ?? null,
     }))
     .sort((a, b) => b.at - a.at)
 }
@@ -147,6 +157,10 @@ export async function listSavedWorlds() {
 async function openSave(bytes) {
   const save = await readSaveFile(bytes)
   const world = resolveWorld(save.meta.world ?? null)
+  // Only checks a world this build does not know: the registry pins its own sizes and a dev
+  // world measures them. An unregistered descriptor could otherwise claim any in-range size
+  // for a real object and have v86 read past the end of it all session.
+  await verifyDiskSizes(world)
   return { save, world, state: await save.state() }
 }
 
@@ -188,7 +202,7 @@ export async function loadSavedSession(world) {
     const legacy = await idbGet(LEGACY_KEY)
     if (
       legacy?.gz &&
-      legacy.imageId === LEGACY_IMAGE_ID &&
+      legacy.imageId === LEGACY_WORLD_ID &&
       isLegacyWorld(world)
     ) {
       const save = await readSaveFile(new Uint8Array(legacy.gz))
@@ -201,7 +215,7 @@ export async function loadSavedSession(world) {
 }
 
 // The v1 world, whether it came from the registry or a dev rewrite of it.
-const isLegacyWorld = (world) => world.id === LEGACY_IMAGE_ID
+const isLegacyWorld = (world) => world.id === LEGACY_WORLD_ID
 
 // GitHub's web URLs (github.com/…/raw/… and /blob/…) 302-redirect to
 // raw.githubusercontent.com, and the *redirect* response carries no CORS header — so a
@@ -219,30 +233,50 @@ function normalizeShareUrl(url) {
 // Fetch a shared machine by URL. Accepts a container or any legacy v1 artifact — every
 // `?share=` link published so far is a bare gzipped state, and those must keep working
 // unchanged, so a file with no world recorded resolves to the legacy world.
-export async function fetchSharedSave(url) {
-  const resp = await fetch(normalizeShareUrl(url))
+// A ceiling on a shared machine. A save is around 13 MB and the biggest plausible one is a
+// few times that; a `?share=` URL is an arbitrary host, so reading it unbounded lets any
+// link decide how much memory this tab uses. Content-Length is not enough on its own — it is
+// the sender's claim — so the stream is counted as it arrives.
+export const MAX_SHARE_BYTES = 128 * 1024 * 1024
+
+async function fetchBounded(url, limit) {
+  const resp = await fetch(url)
   if (!resp.ok) throw new Error(`fetch failed (${resp.status})`)
-  return openSave(new Uint8Array(await resp.arrayBuffer()))
+  const claimed = Number(resp.headers.get('content-length'))
+  if (Number.isFinite(claimed) && claimed > limit)
+    throw new Error(`that machine is too large (${claimed} bytes)`)
+  if (!resp.body) {
+    const bytes = new Uint8Array(await resp.arrayBuffer())
+    if (bytes.length > limit) throw new Error('that machine is too large')
+    return bytes
+  }
+  const reader = resp.body.getReader()
+  const parts = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.length
+    if (total > limit) {
+      await reader.cancel().catch(() => {})
+      throw new Error(`that machine is too large (over ${limit} bytes)`)
+    }
+    parts.push(value)
+  }
+  const out = new Uint8Array(total)
+  let at = 0
+  for (const part of parts) {
+    out.set(part, at)
+    at += part.length
+  }
+  return out
+}
+
+export async function fetchSharedSave(url) {
+  return openSave(await fetchBounded(normalizeShareUrl(url), MAX_SHARE_BYTES))
 }
 
 // --- writing --------------------------------------------------------------------
-
-const MAX_PROVENANCE = 20
-
-// Append one entry per restore (not per save), so the chain records how this file
-// descends from earlier ones without growing on every autosave.
-function nextProvenance(prior, world, instanceId) {
-  const chain = Array.isArray(prior?.provenance) ? [...prior.provenance] : []
-  const last = chain[chain.length - 1]
-  if (last?.instanceId === instanceId) return chain
-  chain.push({
-    instanceId,
-    world: world.id,
-    at: Date.now(),
-    parent: last?.instanceId ?? null,
-  })
-  return chain.slice(-MAX_PROVENANCE)
-}
 
 // Build the container bytes for the running machine.
 //
@@ -312,7 +346,6 @@ async function packSession(
       updatedAt: Date.now(),
       world: worldDescriptor(world),
       tracking: { ...(priorMeta.tracking || {}), ...tracking, instanceId },
-      provenance: nextProvenance(priorMeta, world, instanceId),
     },
     chunks,
   })
@@ -328,19 +361,27 @@ export class StaleSaveError extends Error {
 
 // Store bytes for a world, index it, and prune, all in one transaction.
 //
-// `expectGen` is a compare-and-swap. Each tab holds its own in-memory `prior`, so
-// without this, two tabs on the same machine (or the same save restored twice, which the
-// daemon design explicitly expects) take turns writing containers derived from stale
-// metadata, and each one silently discards the other's chunks and provenance. Pass null
-// to overwrite deliberately.
+// `expectGen` is a compare-and-swap, and it has three values, enforced HERE rather than
+// trusted from the caller:
+//
+//   a number    "I read this generation" — must still match
+//   undefined   "I never looked", which is a claim that nothing is stored, so it is
+//               checked against generation 0 rather than waved through
+//   null        "overwrite deliberately", the only value that skips the check
+//
+// Each tab holds its own in-memory `prior`, so without this two tabs on one machine take
+// turns writing containers derived from stale metadata, each silently discarding the
+// other's chunks. Treating undefined as "no claim" was how a caller could destroy another
+// tab's save by simply forgetting an argument.
 async function writeSlot(worldId, label, bytes, expectGen) {
+  const expected = expectGen === undefined ? 0 : expectGen
   return withStore('readwrite', async (store, req) => {
     const existing = await req(store.get(slotKey(worldId)))
     const currentGen = existing?.gen ?? 0
-    if (expectGen != null && currentGen !== expectGen)
+    if (expected !== null && currentGen !== expected)
       throw new StaleSaveError(
         `this machine was saved elsewhere (generation ${currentGen}, expected ` +
-          `${expectGen}) — reload to pick up the newer save`
+          `${expected}) — reload to pick up the newer save`
       )
     const gen = currentGen + 1
     store.put({ v: 2, worldId, bytes, at: Date.now(), gen }, slotKey(worldId))
@@ -348,17 +389,30 @@ async function writeSlot(worldId, label, bytes, expectGen) {
     // Index first, then prune what the index no longer keeps: if anything goes wrong
     // the index under-promises rather than pointing at records that are gone.
     const index = toIndex(await req(store.get(INDEX_KEY)))
-    index.set(worldId, { at: Date.now(), label })
+    index.set(worldId, { at: Date.now(), label, gen })
+    // Prune only local rebuild worlds. Recency across everything would eventually delete a
+    // participant's real machine to make room for a dev image, and those are not remotely
+    // the same thing: a dev slot is regenerated by rebuilding, a registered one is somebody's
+    // week of work.
+    const disposable = [...index]
+      .filter(([id]) => isDevWorldId(id))
+      .sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0))
     const kept = new Map(
-      [...index]
-        .sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0))
-        .slice(0, MAX_SLOTS)
+      [...index].filter(
+        ([id]) =>
+          !isDevWorldId(id) ||
+          disposable.slice(0, MAX_DEV_SLOTS).some(([keep]) => keep === id)
+      )
     )
     store.put(kept, INDEX_KEY)
     for (const key of await slotKeysIn(store, req)) {
       const id = key.slice('world:'.length)
       if (!kept.has(id)) store.delete(key)
     }
+    // The pre-container slot has now been superseded by a real one for the world it was
+    // captured against. Leaving it there kept a second copy of a multi-megabyte save alive
+    // and let the stale original come back if this slot were ever pruned.
+    if (worldId === LEGACY_WORLD_ID) store.delete(LEGACY_KEY)
     return gen
   })
 }
@@ -370,14 +424,53 @@ async function writeSlot(worldId, label, bytes, expectGen) {
 // from: keep passing the boot-time save and every write re-derives from stale metadata,
 // minting a new file id and dropping chunks that only existed in the stored copy (a
 // thumbnail today, the heartbeat log once the daemon lands).
+// Ask the browser not to evict us, once. Saves are the deliverable: a machine quietly
+// evicted under storage pressure is indistinguishable from one that was never saved. Best
+// effort by design — Firefox prompts, Safari decides for itself, and a refusal is not a
+// reason to fail a save.
+let persistenceAsked = false
+async function askForPersistence() {
+  if (persistenceAsked) return
+  persistenceAsked = true
+  try {
+    if (navigator.storage?.persist && !(await navigator.storage.persisted()))
+      await navigator.storage.persist()
+  } catch {}
+}
+
+// Storage full is the one save failure a user can actually act on, so it says what to do
+// rather than surfacing a DOMException name.
+export class StorageFullError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'StorageFullError'
+  }
+}
+
+const isQuota = (e) =>
+  e?.name === 'QuotaExceededError' ||
+  e?.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+  /quota/i.test(e?.message || '')
+
 export async function saveSession(emulator, opts) {
   const bytes = await packSession(emulator, opts)
-  const gen = await writeSlot(
-    opts.world.id,
-    opts.world.label,
-    bytes,
-    opts.expectGen
-  )
+  await askForPersistence()
+  let gen
+  try {
+    gen = await writeSlot(
+      opts.world.id,
+      opts.world.label,
+      bytes,
+      opts.expectGen
+    )
+  } catch (e) {
+    if (!isQuota(e)) throw e
+    const mb = (bytes.byteLength / 1e6).toFixed(0)
+    throw new StorageFullError(
+      `no room to save (${mb} MB needed). Export the machine to a file, then free ` +
+        'browser storage for this site.'
+    )
+  }
   return { size: bytes.byteLength, save: await readSaveFile(bytes), gen }
 }
 
@@ -413,17 +506,25 @@ export async function readImport(file, runningWorld) {
   const bytes = new Uint8Array(await file.arrayBuffer())
   const { save, world, state } = await openSave(bytes)
   const index = toIndex(await idbGet(INDEX_KEY))
+  const slot = index.get(world.id) ?? null
   return {
     save,
     world,
     state,
     bytes,
     needsReload: world.id !== runningWorld.id,
-    replaces: index.get(world.id) ?? null, // { at, label } or null
+    replaces: slot, // { at, label, gen } or null
+    // What the user is being shown, so the write can refuse if it changed while they were
+    // deciding. Undefined for a slot the index has never seen, which writeSlot checks
+    // against generation 0.
+    gen: slot?.gen ?? undefined,
   }
 }
 
-// Commit a previously read import into its own world's slot. Deliberate overwrite: the
-// user has been shown what it replaces.
-export const storeImport = ({ world, bytes }) =>
-  writeSlot(world.id, world.label, bytes, null)
+// Commit a previously read import into its own world's slot.
+//
+// The user has been shown what this replaces, so it is deliberate — but deliberate about
+// the machine they were *told* about. If another tab saved in between, that consent does not
+// cover the newer machine, so this still compares and swaps and raises StaleSaveError.
+export const storeImport = ({ world, bytes, gen }) =>
+  writeSlot(world.id, world.label, bytes, gen)

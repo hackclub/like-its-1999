@@ -12,6 +12,7 @@ import {
   packSaveFile,
   readSaveFile,
   readContainerMeta,
+  probeSaveFileMeta,
   detectFormat,
   HEADER_SIZE,
   MAGIC,
@@ -28,6 +29,7 @@ import {
   readModeParams,
   isDevWorldId,
   isValidWorldId,
+  verifyDiskSizes,
 } from './worlds.js'
 
 const te = new TextEncoder()
@@ -646,4 +648,125 @@ test('parses the dev mode params', () => {
   assert.equal(p.world, 'dev:abc')
   assert.equal(p.share, 'https://x/y.gz')
   assert.equal(readModeParams('?fresh=0').fresh, false)
+})
+
+// --- reading a remote save's metadata only ---------------------------------------
+
+test('a remote container is probed for metadata without pulling the body', async () => {
+  // The point of the container's uncompressed header: a reviewer can see which world a
+  // submitted machine belongs to, and what it carries, from one small read rather than 65 MB
+  // of RAM image. The 'r' in Range is the sender's promise, so this counts what it gets.
+  const bytes = await packSaveFile({
+    meta: { world: { id: 'win98-checkpoint03-v1' }, note: 'x'.repeat(4096) },
+    chunks: [
+      // Raw and incompressible, so "we did not download the body" means something: a
+      // gzipped chunk of zeros would shrink to nothing and prove nothing.
+      {
+        id: 'state',
+        bytes: Uint8Array.from({ length: 300_000 }, (_, i) => (i * 37) & 0xff),
+        codec: 'raw',
+      },
+      { id: 'thumb', bytes: new Uint8Array(64), codec: 'raw' },
+    ],
+  })
+
+  let served = 0
+  const fetch = async (_url, opts) => {
+    const m = /bytes=0-(\d+)/.exec(opts.headers.Range)
+    const upto = Number(m[1]) + 1
+    served += Math.min(upto, bytes.length)
+    return {
+      ok: true,
+      body: null,
+      arrayBuffer: async () => bytes.slice(0, upto).buffer,
+    }
+  }
+
+  const probed = await probeSaveFileMeta('https://example.test/m.99sv', {
+    fetch,
+    initialBytes: 1024, // deliberately smaller than the metadata, to force the second read
+  })
+  assert.equal(probed.meta.world.id, 'win98-checkpoint03-v1')
+  assert.deepEqual(
+    probed.chunks.map((c) => c.id),
+    ['state', 'thumb']
+  )
+  assert.equal(probed.totalLength, bytes.length)
+  assert.ok(
+    served < bytes.length / 10,
+    `read only the header (${served} of ${bytes.length} bytes)`
+  )
+})
+
+test('a probe refuses an implausible metadata length instead of downloading it', async () => {
+  // Four corrupt bytes must not turn a header read into a full download, which is the one
+  // thing this function exists to avoid.
+  const bytes = await packSaveFile({
+    chunks: [{ id: 'state', bytes: fakeState(64) }],
+  })
+  new DataView(bytes.buffer).setUint32(12, 0x7fffffff, true)
+  const fetch = async () => ({
+    ok: true,
+    body: null,
+    arrayBuffer: async () => bytes.buffer,
+  })
+  await assert.rejects(
+    () => probeSaveFileMeta('https://example.test/m.99sv', { fetch }),
+    /implausibly large/
+  )
+})
+
+test('a probe reports a legacy artifact as having no container metadata', async () => {
+  const gz = new Uint8Array(gzipSync(fakeState(128)))
+  const fetch = async () => ({
+    ok: true,
+    body: null,
+    arrayBuffer: async () => gz.buffer,
+  })
+  assert.equal(
+    await probeSaveFileMeta('https://example.test/old.bin.gz', { fetch }),
+    null
+  )
+})
+
+test('a descriptor cannot lie about how big a disk is', async () => {
+  // The last way a save file could still steer the emulator wrong: claim an in-range size
+  // for a real object, and v86 spends the session reading past the end of it. Only checked
+  // for a world this build does not know, since a registered one pins its own sizes.
+  const desc = {
+    id: 'someone-elses-world',
+    memory: 128 * 1024 * 1024,
+    vgaMemory: 32 * 1024 * 1024,
+    disks: {
+      hda: { url: `https://${CDN_HOST}/v9/hda.img`, size: 314572800 },
+    },
+  }
+  const world = resolveWorld(desc, { dev: false })
+  assert.equal(world.resolvable, false)
+
+  const head = (size) => async () => ({
+    ok: true,
+    headers: new Map([['content-length', String(size)]]),
+  })
+  // Map has .get, which is all probeAsset uses.
+  await assert.rejects(
+    () => verifyDiskSizes(world, { fetch: head(999) }),
+    /but .* is 999/
+  )
+  assert.equal(
+    (await verifyDiskSizes(world, { fetch: head(314572800) })).id,
+    'someone-elses-world',
+    'and the honest case passes through'
+  )
+
+  // A registered world is not probed at all, however wrong the file was.
+  const registered = resolveWorld(LEGACY_WORLD_ID, { dev: false })
+  let called = 0
+  await verifyDiskSizes(registered, {
+    fetch: async () => {
+      called++
+      return { ok: false }
+    },
+  })
+  assert.equal(called, 0)
 })

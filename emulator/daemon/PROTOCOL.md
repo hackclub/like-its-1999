@@ -3,8 +3,9 @@
 How the in-guest agent talks to the page over the emulated serial port, how it gets
 updated, and how it repairs itself.
 
-**Status:** the host half is implemented (`frame.js`, `agent.js`, `link.js`). The guest
-half is not written yet; the C comes next.
+**Status:** both halves are implemented and running. The host is `frame.js`, `agent.js`,
+`link.js`; the guest is `c/parent.c` and `c/child.c`, cross-compiled to `bin/daemon.exe` and
+`bin/child.bin`. The daemon is installed in the local dev image and starts itself at boot.
 
 ## Why a serial port
 
@@ -114,7 +115,7 @@ experiments and a released build must not depend on it.
 | `0x04` | host->g | `epoch`, `hash`, `len`                                  | PAYLOAD_BEGIN: a child binary follows    |
 | `0x05` | host->g | `epoch`, `seq`, `bytes`                                 | PAYLOAD_DATA                             |
 | `0x06` | host->g | `epoch`, `hash`                                         | PAYLOAD_END: verify and run it           |
-| `0x07` | g->host | `epoch`, `code`, `detail`                               | STATUS: progress, child up/down, errors  |
+| `0x07` | g->host | `epoch`, `code`, `detail`, `dropped`                    | STATUS: progress, child up/down, errors  |
 | `0x08` | both    | `epoch`, `n`                                            | PING                                     |
 | `0x09` | both    | `epoch`, `n`                                            | PONG                                     |
 | `0x20` | host->c | `epoch`, `id`, `fn`, `args...`                          | CALL                                     |
@@ -148,6 +149,15 @@ Reloading the page restores saved RAM; it does not re-run Windows startup. A par
 died before a save is dead in every restore of that save, and only a Force Reboot (which
 zeroes RAM and re-runs StartUp) brings it back. A child that dies is invisible to the user
 because the parent restarts it.
+
+**Writing to the child can never park the parent.** The one place the parent writes into
+something it does not control is the child's pipe, and a child that stops reading fills it.
+A blocking write there would leave the process that must never stop unable to read the port,
+run supervision, or kill the child that wedged it — the liveness check exists for exactly
+that failure and would never have run. So our end of the pipe is non-blocking with a
+deadline, a write that cannot complete promptly is reported as `child-down` and the child is
+killed, and on the platform where non-blocking mode is refused the liveness file gates the
+write instead.
 
 **Port ownership.** The parent holds COM1 for the machine's whole life and never hands it
 over. So there is no port to orphan when a child dies, no `CreateFile` race on respawn, and
@@ -185,13 +195,19 @@ Then, by case:
   `ANNOUNCE` is what makes it possible, and it is validated as a filename (letters and
   digits only) before it becomes one.
 - **Parent reports a different hash, and does not have the wanted one.** Host sends
-  `PAYLOAD_BEGIN`, the data, then `PAYLOAD_END`. The parent verifies the hash, writes `CACHE\<hash>.EXE`, stops any
-  existing child, deletes the binary it supersedes, spawns the new one, and `STATUS`es the
-  result. There is no separate
+  `PAYLOAD_BEGIN`, the data, then `PAYLOAD_END`. The parent verifies the hash, writes
+  `CACHE\<hash>.EXE`, stops the existing child and starts the new one. There is no separate
   upgrade negotiation and no live in-place upgrade: replacing the child _is_ the upgrade.
-- **Push fails** (bad hash, disk error, spawn failure): the parent keeps whatever child it
-  already had and says so. Something running beats nothing running. The host does not
-  retry the same bytes, because they would fail the same way.
+  The binary being replaced is deleted **only once the new child is confirmed running**, and
+  "running" means still alive a moment after the spawn, because creating a process succeeds
+  for plenty of binaries that cannot actually run.
+- **Push fails** (bad hash, disk error, a child that will not start): the parent keeps
+  whatever _build_ it already had and says so. A transfer failure never touches the running
+  child at all; a spawn failure restarts the previous build, since swapping children stops
+  the old one before trying the new one. A transfer that fails never touches the running
+  child; a transfer that succeeds but will not spawn is rolled back to the previous binary,
+  which is still on disk for exactly this reason. Something running beats nothing running.
+  The host does not retry the same bytes, because they would fail the same way.
 - **The child dies later.** The parent reports `child-down` and then **re-identifies**, so
   the host learns there is something to do. The parent respawns from cache when it can,
   but a machine that has never been given a child has nothing cached, so the re-identify is
@@ -206,6 +222,28 @@ page that never asked, the stale `REPLY` arrives, and it is dropped instead of b
 matched to a live request. `CALL`/`REPLY` also carry an `id`, and an unmatched `id` is
 dropped: two layers, because a save can be restored twice into two pages that both minted
 epochs.
+
+**Resynchronisation is normative, and stronger than "wait for the rest".** A decoder that
+simply waits for an incomplete frame can be parked indefinitely by a stale header: a restore
+leaves plausible bytes in the UART claiming 64 KB, and every real frame behind it becomes
+payload until that much traffic arrives. So an incomplete candidate is only honoured while
+nothing later in the buffer proves to be a complete CRC-valid frame; when one does, the
+candidate was noise and is dropped. A frame genuinely arriving in pieces is still waited
+for, because nothing later validates.
+
+**`RESET` clears protocol state, not buffered bytes.** The bytes still held arrived _after_
+it, and the host sends `RESET` and `ANNOUNCE` back to back on its first tick, so they
+routinely land in one read.
+
+**Refusals are reported, and that is normative too.** The parent's own bug history is
+dominated by silent early returns: something declines to happen and the host experiences it
+only as tracking that stopped. So every path that refuses to do what was asked emits a
+`STATUS` with a reason — a cached binary that has vanished, a hash that cannot be a filename,
+a child that will not take a frame. The two exceptions are deliberate and documented in the
+code: "already running that build" and "never seen that build" are the steady states, and
+announces arrive every two seconds. A frame the parent could not build or encode cannot be
+reported by sending a frame, so it is counted and the count rides out on the next `STATUS`
+as `dropped`, which is otherwise always zero.
 
 **Robustness rules, all normative.** Unknown types, unknown flags, unknown epochs, unknown
 ids, bad CRCs, oversize lengths and truncated tails are **dropped, never fatal**. Nothing
@@ -232,7 +270,7 @@ frame ever waits for the slow tick.
 ## Time and identity
 
 **Host time is authoritative.** A restored guest resumes with a stale RTC, so guest
-timestamps can repeat, jump or run backwards. The guest reports a monotonic `tick`
+timestamps can repeat, jump or run backwards. The parent reports its own monotonic `tick`
 (`GetTickCount`), which is an ordering hint only; the host stamps real time on everything
 it records.
 
@@ -252,9 +290,9 @@ policy lives in JS on the host, which is testable; the guest stays as dumb as po
 | `health`        | `ver`, `uptimeMs`, `exe`, `diag`       |
 | `exec`          | `code`, `output` — dev only, see below |
 
-| event | fields                 | when                          |
-| ----- | ---------------------- | ----------------------------- |
-| `win` | `exe`, `title`, `tick` | the foreground window changed |
+| event | fields         | when                          |
+| ----- | -------------- | ----------------------------- |
+| `win` | `exe`, `title` | the foreground window changed |
 
 `diag` is a short line about the guest as the child sees it (whether there is a foreground
 window, whether ToolHelp answers, `COMSPEC`, the working directory). It exists because the

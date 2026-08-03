@@ -214,12 +214,17 @@ export function worldDescriptor(world) {
 //   - a registered id -> the registry entry WINS over whatever the file says, so a
 //     moved CDN prefix is a one-line fix here instead of a rewrite of files in the wild
 //   - anything else -> validated against the allowlist, or refused
+// Can this world be found again after a page reload, from its id alone? True for a
+// registered world (the registry has it) and for the current local image (it can be
+// re-measured). False for a validated descriptor out of a save file: nothing but that file
+// knows what it means, so storing a machine under it would put it somewhere no later load
+// could reach. Never written into a save — worldDescriptor copies only its own key list.
 export function resolveWorld(desc, opts = {}) {
   const env = envDefaults(opts)
   const registered = (id) => {
     const world = WORLDS.get(id)
     if (!world) return null
-    return env.dev ? forDev(world) : world
+    return { ...(env.dev ? forDev(world) : world), resolvable: true }
   }
 
   if (desc == null) return registered(LEGACY_WORLD_ID)
@@ -238,7 +243,34 @@ export function resolveWorld(desc, opts = {}) {
       `"${String(id).slice(0, 64)}" is a local build's world — it can only be opened ` +
         'on the machine that made it, against the same image'
     )
-  return validateWorld(desc, opts)
+  return { ...validateWorld(desc, opts), resolvable: false }
+}
+
+// Check a world's disk sizes against the objects themselves.
+//
+// Only worth doing for a world that came out of a save file. A registered world's sizes are
+// pinned in the registry beside its URLs, and a dev world measures them, so neither can be
+// wrong; an unregistered descriptor can claim any in-range number for a real object, and v86
+// would then read past the end of it for the rest of the session. Cheap, because it is one
+// HEAD per disk and only on the rare path.
+//
+// A host that will not answer HEAD is not a reason to refuse: `probeAsset` returns null and
+// the claim stands, which is the same degradation the dev fingerprint already accepts.
+export async function verifyDiskSizes(world, opts = {}) {
+  if (world.resolvable !== false) return world
+  const doFetch = opts.fetch || globalThis.fetch
+  const entries = Object.entries(world.disks)
+  const probes = await Promise.all(
+    entries.map(([, d]) => probeAsset(d.url, doFetch))
+  )
+  entries.forEach(([key, d], i) => {
+    const actual = probes[i]?.size
+    if (actual && actual !== d.size)
+      throw new Error(
+        `that machine says ${key} is ${d.size} bytes, but ${d.url} is ${actual}`
+      )
+  })
+  return world
 }
 
 // The V86 constructor options a world implies. Everything else (bios, screen, wasm)
@@ -381,6 +413,7 @@ async function makeDevWorld(base, opts = {}) {
     initialState: stateProbe && !snapshotIsStale ? { url: stateUrl } : null,
     snapshotIsStale,
     dev: true,
+    resolvable: true,
   }
 }
 
@@ -392,10 +425,14 @@ async function makeDevWorld(base, opts = {}) {
 // that could bypass the measurement would reintroduce the hole.
 export async function currentWorld(params = {}, opts = {}) {
   const env = envDefaults(opts)
-  const forHere = (world) => (env.dev ? forDev(world) : world)
+  const forHere = (world) => ({
+    ...(env.dev ? forDev(world) : world),
+    resolvable: true,
+  })
   const mint = () => makeDevWorld(DEV_BASE, opts)
 
-  if (!params.world) return env.dev ? mint() : WORLDS.get(CURRENT_WORLD_ID)
+  if (!params.world)
+    return env.dev ? mint() : forHere(WORLDS.get(CURRENT_WORLD_ID))
 
   if (!isValidWorldId(params.world)) throw new Error('not a valid world id')
   const registered = WORLDS.get(params.world)

@@ -35,6 +35,7 @@ typedef struct {
   void *to_in;  /* our write end -> the child's stdin */
   void *from_out; /* our read end <- the child's stdout */
   int running;
+  int nonblocking; /* the write end refuses to block; see p_child_write */
 } p_child;
 
 void p_child_init(p_child *c);
@@ -47,6 +48,18 @@ int p_child_alive(p_child *c);
 void p_child_kill(p_child *c);
 /* Non-blocking, same contract as p_serial_read. */
 int p_child_read(p_child *c, u8 *buf, int max);
+/* Writes a whole frame or nothing useful, and NEVER blocks indefinitely.
+ *
+ * This is the parent's most dangerous call. A child that stops reading its stdin fills the
+ * pipe, and a blocking write then parks the one process that must never stop: it could no
+ * longer read COM1, run supervision, or kill the very child that wedged it. So the write
+ * end is put in non-blocking mode at spawn and this gives up after P_CHILD_WRITE_MS.
+ *
+ * Returns P_FAIL on timeout, and the caller must treat that as a wedged child rather than
+ * a dropped frame. A partial write is survivable at the protocol level (the child's
+ * decoder resynchronises past the truncated frame) but is never survivable as a silent
+ * condition, which is why it is reported. */
+#define P_CHILD_WRITE_MS 250
 int p_child_write(p_child *c, const u8 *buf, int len);
 
 /* --- files ---------------------------------------------------------------------- */

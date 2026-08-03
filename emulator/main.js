@@ -14,6 +14,7 @@ import {
   storeImport,
   fetchSharedSave,
   StaleSaveError,
+  StorageFullError,
 } from './persist.js'
 import {
   readModeParams,
@@ -106,17 +107,21 @@ if (!world) {
 // Gather the facts, then let session.js decide. Every combination of shared / fresh /
 // nosave / unreadable / generation is table-tested there rather than reasoned about here.
 const saved = isShared || params.fresh ? null : await loadSavedSession(world)
-const otherDevSaves =
-  !saved && isDevWorldId(world.id)
-    ? (await listSavedWorlds()).some((s) => isDevWorldId(s.worldId))
-    : false
-
+// Two facts about *other* slots, both read from the small index rather than the records.
+// `otherDevSaves` distinguishes a rebuilt local image from a first visit; `storedElsewhere`
+// is whether a fresh boot has something it would destroy by saving.
+const slots =
+  !saved && !isShared && (params.fresh || isDevWorldId(world.id))
+    ? await listSavedWorlds()
+    : []
 const plan = planBoot({
   params,
   shared,
   saved,
   world,
-  otherDevSaves,
+  otherDevSaves:
+    isDevWorldId(world.id) && slots.some((s) => isDevWorldId(s.worldId)),
+  storedElsewhere: slots.some((s) => s.worldId === world.id),
   worldNote,
 })
 const session = sessionFrom(plan)
@@ -194,7 +199,6 @@ emulator.add_listener('download-progress', (e) => {
 // An image with the daemon installed answers, and usually already has the child we want
 // cached, in which case nothing is transferred at all. A push only happens when the build
 // has changed.
-let trackingState = 'idle'
 // Fetched rather than imported: the hash is derived from the bytes, and a build with no
 // agent binary is a normal state that must not stop the page.
 const daemonBuild = await loadDaemon()
@@ -205,7 +209,6 @@ const link = createLink({
   wantHash: daemonBuild.hash,
   wantBytes: daemonBuild.bytes,
   onState: (state) => {
-    trackingState = state
     if (state === 'ready') setStatus(`${bootNote || 'tracking on'}`)
   },
 })
@@ -332,8 +335,8 @@ const $ = (id) => document.getElementById(id)
 const clock = () =>
   new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
-// Everything the container needs besides the RAM image: the world, the provenance chain,
-// the thumbnail, and this instance's tracking log.
+// Everything the container needs besides the RAM image: the world, the thumbnail, and this
+// instance's tracking log.
 //
 // The thumbnail is captured only for deliberate saves. An autosave skips it: the
 // pagehide/beforeunload path is a race against the tab closing, and rendering plus
@@ -369,6 +372,13 @@ async function doSave(label = 'saved', { auto = false, force = false } = {}) {
     Object.assign(session, applySave(session, { save, gen }))
     setStatus(`${label} ${clock()} · ${(size / 1e6).toFixed(1)} MB`)
   } catch (e) {
+    if (e instanceof StorageFullError) {
+      // The one save failure a user can act on, so it says what to do.
+      console.warn(e.message)
+      setStatus('out of browser storage — export to a file')
+      alert(e.message)
+      return
+    }
     if (e instanceof StaleSaveError) {
       // Another tab owns this machine now. Silently winning would discard its work.
       console.warn(e.message)
@@ -400,8 +410,8 @@ $('save')?.addEventListener('click', () => {
   if (
     session.blocked &&
     !confirm(
-      `There's a saved machine here that this version can't open:\n${session.blocked}\n\n` +
-        'Saving will replace it permanently. Continue?'
+      `${session.blocked}\n\nSaving will replace the machine stored here, permanently. ` +
+        'Continue?'
     )
   )
     return
@@ -516,7 +526,11 @@ $('import')?.addEventListener('change', async (e) => {
     setStatus(`imported ${clock()}`)
   } catch (err) {
     console.error(err)
-    setStatus(`import failed: ${err.message}`)
+    setStatus(
+      err instanceof StaleSaveError
+        ? 'that machine was saved in another tab — reload and try again'
+        : `import failed: ${err.message}`
+    )
   }
   e.target.value = ''
 })
@@ -598,8 +612,24 @@ $('reboot')?.addEventListener('click', () => {
   setStatus(`rebooted ${clock()}`)
 })
 
+// Reset always completes, deliberately: it is the escape hatch for a machine that is
+// already in a bad state, so it must not be refusable. But if another tab has saved since
+// this one loaded, the machine being discarded is not the one the user has in mind, so they
+// get told before it goes.
 $('reset')?.addEventListener('click', async () => {
   if (!confirm('Discard your saved session and reset to the clean image?'))
+    return
+  const current = (await listSavedWorlds()).find((s) => s.worldId === world.id)
+  if (
+    current?.gen != null &&
+    session.gen != null &&
+    current.gen !== session.gen &&
+    !confirm(
+      'This machine was saved in another tab since you opened this one, so the ' +
+        'machine you are discarding is newer than the one you have been looking at.' +
+        '\n\nDiscard it anyway?'
+    )
+  )
     return
   await clearSavedSession(world)
   const url = new URL(location.href)

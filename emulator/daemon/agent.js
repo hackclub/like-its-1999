@@ -181,7 +181,16 @@ export function onFrame(a, frame, now = 0) {
         break
       }
 
-      a.statuses.push({ code, detail, at: now })
+      // The parent's count of frames it could not send. A reply it failed to encode looks
+      // to us exactly like a call that was never answered, so the number is the only way to
+      // tell those apart. Absent from older parents, which is why it is optional.
+      const dropped = fieldInt(rest[2])
+      a.statuses.push({
+        code,
+        detail,
+        at: now,
+        ...(dropped ? { droppedByGuest: dropped } : {}),
+      })
       if (a.statuses.length > 50) a.statuses.shift()
       events.push({ type: 'status', code, detail })
       if (code === 'push-failed') a.transfer = null

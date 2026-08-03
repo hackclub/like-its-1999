@@ -81,6 +81,10 @@ function startParent(env = {}) {
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   proc.stderr.resume() // p_log output; ignored unless a test is being debugged
+  // Writing to a parent we have killed is expected, not a failure: several tests push
+  // frames at it and then let it die. Without this, Node turns the EPIPE into an
+  // uncaught exception after the test has already passed.
+  proc.stdin.on('error', () => {})
   procs.push(proc)
   return proc
 }
@@ -416,5 +420,143 @@ test(
       Number(later) >= Number(uptime),
       'the same child is still running, not a fresh one'
     )
+  }
+)
+
+test(
+  'RESET and ANNOUNCE arriving in one read both get handled',
+  { skip: !have && 'build first' },
+  async (t) => {
+    // The host sends these back to back on its first tick, so they routinely land in a
+    // single read. The parent used to clear its decoder on RESET, throwing away the
+    // announce sitting behind it in the same buffer, and stayed silent until the next one
+    // two seconds later. The fake guest cannot catch this: it decodes both frames before
+    // handling either.
+    const proc = startParent()
+    const { encode, TYPES, createDecoder, decodeFields, fieldText } =
+      await import('./frame.js')
+    const idents = []
+    const dec = createDecoder()
+    proc.stdout.on('data', (buf) => {
+      for (const f of dec.push(new Uint8Array(buf)))
+        if (f.type === TYPES.IDENT)
+          idents.push(decodeFields(f.payload).map(fieldText))
+    })
+    t.after(() => proc.kill('SIGKILL'))
+
+    proc.stdin.write(
+      Buffer.concat([
+        Buffer.from(encode(TYPES.RESET, [])),
+        Buffer.from(encode(TYPES.ANNOUNCE, ['e-oneread', '1', ''])),
+      ])
+    )
+    const ident = await until(
+      'an ident from the combined read',
+      () => idents[0],
+      5000
+    )
+    assert.equal(
+      ident[0],
+      'e-oneread',
+      'and it adopted the epoch from that announce'
+    )
+  }
+)
+
+test(
+  'a child that will not start leaves the working one running',
+  { skip: !have && 'build first' },
+  async (t) => {
+    // PROTOCOL.md promises a failed push keeps whatever child was already there. The
+    // transfer failing was handled; a transfer that arrives perfectly and then cannot be
+    // spawned was not, and it deleted the binary that worked on the way through.
+    const { link } = await ready(t, { hash: 'goodbuild' })
+    await until('the good child', () => link.state === 'ready')
+    const [, uptime] = await link.call('health')
+
+    // A file that is not a program: the fork succeeds and the exec does not, which is what
+    // the spawn confirmation exists to notice.
+    link.setWanted({ hash: 'badbuild', bytes: new Uint8Array(64).fill(0x41) })
+
+    await until('the parent to report it', () =>
+      link.agent.statuses.some((s) => s.detail === 'it would not start')
+    )
+    await until('a rollback to the working child', () =>
+      link.agent.statuses.some((s) =>
+        s.detail?.includes('kept the previous one')
+      )
+    )
+    // The guest is running the child that works. The host is deliberately NOT "ready",
+    // because it still wants the build it asked for and will not use a different one: a bad
+    // build costs tracking until it is fixed, but it no longer costs the binary.
+    await until(
+      'the good child to be running again',
+      () => link.agent.role === 'child' && link.agent.hash === 'goodbuild',
+      15000
+    )
+    assert.ok(
+      readdirSync(join(dir, 'CACHE')).includes('goodbuild.EXE'),
+      'its binary was never deleted'
+    )
+
+    // And asking for it again recovers from the cache, with nothing on the wire.
+    link.setWanted({ hash: 'goodbuild', bytes: await childBytes() })
+    await until('ready', () => link.state === 'ready', 15000)
+    const [ver] = await link.call('health')
+    assert.equal(ver, '0.1', 'and it answers')
+    // What is and is not promised: the surviving *binary* is never deleted, and it gets
+    // restarted rather than kept running, because swapping children stops the old one before
+    // trying the new one. `uptime` above only proves it was alive to begin with.
+    assert.ok(Number(uptime) >= 0)
+  }
+)
+
+test(
+  'a child that stops reading its pipe cannot park the parent',
+  { skip: !have && 'build first' },
+  async (t) => {
+    // The parent's primary invariant. A blocking write into a full pipe would leave the one
+    // process that must never stop unable to read the port, run supervision, or kill the
+    // child that wedged it.
+    const { proc, link } = await ready(t, { hash: 'wedgehash' })
+    await until('ready', () => link.state === 'ready')
+    const [, pidOut] = await link.call('exec', ['echo $PPID'])
+    const childPid = Number(String(pidOut).trim())
+    assert.ok(childPid > 0)
+    process.kill(childPid, 'SIGSTOP')
+    t.after(() => {
+      try {
+        process.kill(childPid, 'SIGKILL')
+      } catch {}
+    })
+
+    // Enough calls to fill any pipe buffer. These are forwarded verbatim, so the parent is
+    // writing into a reader that has stopped.
+    const { encode, TYPES } = await import('./frame.js')
+    const one = Buffer.from(
+      encode(TYPES.CALL, [link.agent.epoch, '9', 'health', 'x'.repeat(200)])
+    )
+    proc.stdin.write(Buffer.concat(Array.from({ length: 1200 }, () => one)))
+
+    // The point of the test: it is still talking to us.
+    await until(
+      'the parent to notice and drop the child',
+      () => link.agent.statuses.some((s) => s.code === 'child-down'),
+      15000
+    )
+    const before = link.agent.msSinceHeard
+    await until(
+      'the parent to still be answering',
+      async () => {
+        const r = await link.call('health').then(
+          () => true,
+          () => true
+        )
+        return r && link.agent.state !== 'idle'
+      },
+      10000
+    )
+    assert.ok(before !== null, 'we had heard from it')
+    await until('a replacement child', () => link.state === 'ready', 20000)
   }
 )

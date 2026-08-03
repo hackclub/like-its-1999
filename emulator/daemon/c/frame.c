@@ -44,10 +44,6 @@ void f_dec_init(f_decoder *d) {
   d->dropped = 0;
 }
 
-void f_dec_reset(f_decoder *d) {
-  d->len = 0;
-  d->start = 0;
-}
 
 static void compact(f_decoder *d) {
   if (d->start == 0) return;
@@ -75,6 +71,11 @@ int f_dec_push(f_decoder *d, const u8 *b, int n) {
 }
 
 int f_dec_next(f_decoder *d, f_frame *out) {
+  /* Where an incomplete-but-plausible candidate began, so that waiting for it can be
+   * unwound if something later turns out to be a real frame. -1 means none seen. */
+  int stalled = -1;
+  u32 stalled_dropped = 0;
+
   compact(d);
   for (;;) {
     int avail = d->len - d->start;
@@ -103,7 +104,20 @@ int f_dec_next(f_decoder *d, f_frame *out) {
       continue;
     }
     total = F_HEADER + (int)len + F_TRAILER;
-    if (avail < total) break; /* genuinely incomplete */
+    if (avail < total) {
+      /* Incomplete, and possibly not a frame at all. A restored snapshot can leave a stale
+       * header in the UART claiming 64 KB, and waiting for it would swallow every frame
+       * behind it until that much traffic had arrived — on a link that is idle except for
+       * an announce every couple of seconds, that is minutes of being deaf. Keep looking
+       * past it, and only come back to it if nothing later proves to be real. */
+      if (stalled < 0) {
+        stalled = d->start;
+        stalled_dropped = d->dropped;
+      }
+      d->start++;
+      d->dropped++;
+      continue;
+    }
 
     want = rd32(p + F_HEADER + (int)len);
     got = f_crc32(p + 2, F_HEADER - 2 + (int)len);
@@ -117,7 +131,11 @@ int f_dec_next(f_decoder *d, f_frame *out) {
     out->payload = p + F_HEADER;
     out->len = (int)len;
     d->start += total;
-    return 1;
+    return 1; /* a real frame: the stalled candidate, if any, was noise */
+  }
+  if (stalled >= 0) {
+    d->start = stalled;
+    d->dropped = stalled_dropped;
   }
   return 0;
 }
@@ -170,7 +188,10 @@ int f_field_uint(const f_field *f, u32 *out) {
   for (i = 0; i < f->len; i++) {
     u8 c = f->p[i];
     if (c < '0' || c > '9') return 0;
-    if (v > 429496729UL) return 0; /* would overflow on the next multiply */
+    /* Both halves matter. The multiply overflows above 429496729, and at exactly that
+     * value it depends on the digit: 4294967296 wrapped to 0 and was accepted as a
+     * perfectly good zero, which is the worst possible way to fail a length check. */
+    if (v > 429496729UL || (v == 429496729UL && c > '5')) return 0;
     v = v * 10 + (u32)(c - '0');
   }
   *out = v;

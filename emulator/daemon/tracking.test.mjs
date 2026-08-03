@@ -32,14 +32,13 @@ const actives = (l) => l.lines.filter((x) => x.ev === 'active')
 
 test('a window change is recorded once, and repeats are not', () => {
   const l = log()
-  onWindow(l, { exe: 'EDITPLUS.EXE', win: 'a - EditPlus', tick: 5 }, 0)
+  onWindow(l, { exe: 'EDITPLUS.EXE', win: 'a - EditPlus' }, 0)
   assert.equal(
     onWindow(l, { exe: 'EDITPLUS.EXE', win: 'a - EditPlus' }, 1000),
     null
   )
   onWindow(l, { exe: 'PSP.EXE', win: 'Paint Shop Pro' }, 2000)
   assert.deepEqual(kinds(l), ['win', 'win'])
-  assert.equal(l.lines[0].tick, 5, 'the guest tick is kept as an ordering hint')
 })
 
 test('typing for a while produces a keepalive rhythm, not a line per keystroke', () => {

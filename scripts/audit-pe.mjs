@@ -25,6 +25,9 @@ const ALLOWED = {
     'CloseHandle',
     'CreatePipe',
     'PeekNamedPipe',
+    // PIPE_NOWAIT on our end of the child pipe, so a wedged child cannot park the parent
+    // inside a write. Present since Windows 95 for LAN Manager compatibility.
+    'SetNamedPipeHandleState',
     'GetFileAttributesA',
     'DeleteFileA',
     'CreateDirectoryA',

@@ -65,7 +65,10 @@ typedef struct {
 } f_decoder;
 
 void f_dec_init(f_decoder *d);
-void f_dec_reset(f_decoder *d);
+/* There is no f_dec_reset. RESET clears protocol state and deliberately leaves the byte
+ * stream alone (the bytes still buffered arrived after it), and framing recovers from
+ * garbage by itself, so nothing in the guest ever needs to discard the buffer. The JS
+ * decoder keeps a reset() because the fake guest uses it to model a restart. */
 
 /* Append bytes, returning how many were accepted, which may be fewer than offered: the
  * buffer holds one maximum frame and no more. Callers MUST loop, draining frames between

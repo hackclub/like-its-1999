@@ -75,6 +75,46 @@ test('?fresh=1 cold boots and can still save', () => {
   assert.equal(verdict.expectGen, null)
 })
 
+test('?fresh=1 does not silently destroy a machine that is stored', () => {
+  // The dangerous version: fresh claims no generation, so the 120-second autosave replaced
+  // hours of somebody's work two minutes after a URL parameter, with no click involved.
+  // Now it starts blocked, which autosaves decline in silence.
+  const plan = planBoot({
+    params: { fresh: true },
+    saved: null,
+    world: withSnapshot,
+    storedElsewhere: true,
+  })
+  assert.equal(plan.source, 'cold')
+  assert.match(plan.blocked, /click Save/)
+
+  const session = sessionFrom(plan)
+  assert.equal(
+    planSave({ session, auto: true }).allowed,
+    false,
+    'autosave declines'
+  )
+  assert.equal(
+    planSave({ session, auto: true }).reason,
+    null,
+    'and says nothing, since nobody asked'
+  )
+
+  // A deliberate save, having been shown what it replaces, goes through and skips the
+  // generation check — there is no generation to claim after ignoring the slot.
+  const forced = planSave({ session, force: true })
+  assert.equal(forced.allowed, true)
+  assert.equal(forced.expectGen, null)
+
+  // And with nothing stored, fresh saves without ceremony.
+  const empty = planBoot({ params: { fresh: true }, world: withSnapshot })
+  assert.equal(empty.blocked, null)
+  assert.equal(
+    planSave({ session: sessionFrom(empty), auto: true }).allowed,
+    true
+  )
+})
+
 test('a stored session is restored and carries its generation forward', () => {
   const plan = planBoot({ saved: stored(), world: withSnapshot })
   assert.equal(plan.source, 'saved')
@@ -100,13 +140,17 @@ test('an unreadable save is booted around, never overwritten', () => {
     world: withSnapshot,
   })
   assert.equal(plan.source, 'snapshot', 'boot the shipped image instead')
-  assert.equal(plan.blocked, 'needs a newer version')
+  assert.match(plan.blocked, /cannot read the machine saved here/)
+  assert.match(plan.blocked, /needs a newer version/, 'and says why')
   assert.equal(plan.prior, null)
   assert.match(plan.note, /not overwriting/)
 
-  // And no save may proceed unless it is forced.
+  // And no save may proceed unless it is forced. The refusal quotes the reason, because
+  // reusing one message for every blocked session had a fresh boot claiming this build
+  // could not read a machine it reads perfectly well.
   const session = sessionFrom(plan)
   assert.equal(planSave({ session }).allowed, false)
+  assert.equal(planSave({ session }).reason, plan.blocked)
   assert.equal(planSave({ session, auto: true }).allowed, false)
   assert.equal(planSave({ session, force: true }).allowed, true)
   assert.equal(planSave({ session, force: true }).expectGen, null)
@@ -147,6 +191,19 @@ test('cold boots when there is no snapshot, or the snapshot is older than the di
   const restored = planBoot({ saved: stored(), world: staleSnapshot })
   assert.equal(restored.source, 'saved')
   assert.equal(restored.note, '')
+})
+
+test('a fresh boot over a stored machine still explains a bad world', () => {
+  // Two notes at once. The fresh message used to overwrite the world one, so
+  // ?fresh=1&world=bogus said nothing about why it was not the world you asked for.
+  const plan = planBoot({
+    params: { fresh: true },
+    world: withSnapshot,
+    storedElsewhere: true,
+    worldNote: 'unknown world "bogus"',
+  })
+  assert.match(plan.note, /unknown world/)
+  assert.match(plan.note, /saved machine is untouched/)
 })
 
 test('a world-resolution message survives to the toolbar', () => {
@@ -306,8 +363,8 @@ test('a forced save clears the blocked flag so later autosaves work normally', (
 
 // --- planImport -----------------------------------------------------------------
 
-const importOf = (over = {}) => ({
-  world: { id: 'w', label: 'World W' },
+const importOf = ({ resolvable = true, ...over } = {}) => ({
+  world: { id: 'w', label: 'World W', resolvable },
   save: saveFile('imported'),
   state: 'bytes',
   needsReload: false,
@@ -328,9 +385,21 @@ test('importing over an existing machine asks first', () => {
 })
 
 test('a machine for another world reloads into that world', () => {
-  const v = planImport({ imported: importOf({ needsReload: true }) })
+  const v = planImport({
+    imported: importOf({ needsReload: true }),
+  })
   assert.equal(v.needsReload, true)
   assert.equal(v.refuse, null)
+})
+
+test('a machine for a world this build cannot resolve is refused', () => {
+  // Storing it would put a machine in a slot that no later page load could ever open,
+  // because a reload can only find a registered world or the current local image.
+  const v = planImport({
+    imported: importOf({ needsReload: true, resolvable: false }),
+  })
+  assert.match(v.refuse, /does not have/)
+  assert.equal(v.needsConfirm, false)
 })
 
 test('?nosave=1 refuses an import it would have to store', () => {

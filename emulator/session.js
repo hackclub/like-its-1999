@@ -26,6 +26,8 @@ export const BOOT_SOURCES = ['shared', 'saved', 'snapshot', 'cold']
 //   world   the resolved world (needs id, initialState, snapshotIsStale)
 //   otherDevSaves  true when some *other* dev world has a save, which is how a rebuilt
 //                  local image is distinguished from a first-ever visit
+//   storedElsewhere true when a machine IS stored for this world but we deliberately did
+//                  not read it (?fresh=1), so a save has something to destroy
 //   worldNote  a message from world resolution that should survive to the toolbar
 //
 // Returns { source, prior, gen, blocked, note }. `gen` is the compare-and-swap claim
@@ -37,6 +39,7 @@ export function planBoot({
   saved = null,
   world = {},
   otherDevSaves = false,
+  storedElsewhere = false,
   worldNote = '',
 } = {}) {
   const plan = {
@@ -62,15 +65,35 @@ export function planBoot({
   plan.note = worldNote
 
   if (params.fresh) {
-    // "Ignore what's stored and start clean", so a later save is meant to replace it.
-    // Checking a generation we never read would just refuse that write.
-    return { ...plan, source: 'cold', gen: null }
+    // "Ignore what's stored and start clean", so a later save is meant to replace it, and
+    // checking a generation we never read would just refuse that write.
+    //
+    // But replacing it has to be asked for. A URL parameter plus two minutes of autosave
+    // is not consent to destroy hours of someone's work, so when there IS a machine here
+    // the session starts blocked: autosaves decline silently, a Save click confirms and
+    // proceeds, and from then on it behaves normally.
+    // Both notes can apply at once (?fresh=1&world=bogus), and the world-resolution
+    // message is the one the user cannot otherwise discover, so it comes first.
+    const freshNote = storedElsewhere
+      ? 'fresh boot; the saved machine is untouched'
+      : ''
+    return {
+      ...plan,
+      source: 'cold',
+      gen: null,
+      blocked: storedElsewhere
+        ? 'started fresh — click Save to replace the machine stored here'
+        : null,
+      note: [worldNote, freshNote].filter(Boolean).join(' · '),
+    }
   }
 
   if (saved?.readOnly) {
     // A save we can't parse is still someone's machine. Boot around it and refuse to
     // write, rather than treating it as absent and overwriting it on the next autosave.
-    plan.blocked = saved.reason
+    // Phrased as a refusal, because it is shown as one: in the toolbar when a save
+    // declines, and in the confirm dialog when the user insists.
+    plan.blocked = `this build cannot read the machine saved here (${saved.reason})`
     plan.note = 'existing save not readable — not overwriting it'
   } else if (saved) {
     plan.source = 'saved'
@@ -126,8 +149,7 @@ export function planSave({
 
   if (params.nosave) return no('saving is off (?nosave)')
   if (auto && isShared) return no(null)
-  if (session.blocked && !force)
-    return no('not saving over a machine this build cannot read')
+  if (session.blocked && !force) return no(session.blocked)
   if (saving) return no('a save is already in progress')
 
   return {
@@ -181,6 +203,20 @@ export function planImport({ imported, params = {} } = {}) {
       refuse:
         `that machine belongs to ${world.label}, which needs saving to open — ` +
         'not possible with ?nosave=1',
+    }
+  // A cross-world import is stored and then reloaded into with ?world=<id>, and only a
+  // registered (or freshly measured local) world can be resolved that way. A file naming
+  // some other world would be stored into a slot nothing could ever open again, so refuse
+  // it rather than appearing to work. A `?share=` link of the same file still opens, since
+  // that path carries the descriptor with it and never stores anything.
+  if (needsReload && !world.resolvable)
+    return {
+      needsConfirm: false,
+      replaces,
+      needsReload,
+      refuse:
+        `that machine belongs to ${world.label}, which this version of the page does ` +
+        'not have. Open it with a ?share= link instead, or update the page.',
     }
   return {
     // Importing replaces a stored machine unrecoverably, so ask first — and only when

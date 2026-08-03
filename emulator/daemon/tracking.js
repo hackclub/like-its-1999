@@ -11,8 +11,8 @@
 //   - at most one keepalive line every 2 minutes while input continues
 //   - a line when input stops for longer than the idle gap, closing the span
 //
-// Time is the host's throughout. A restored guest resumes with a stale RTC, so its `tick`
-// is recorded as an ordering hint and never used as a clock.
+// Time is the host's throughout: a restored guest resumes with a stale RTC, so nothing the
+// guest says about time is recorded at all.
 
 export const KEEPALIVE_MS = 2 * 60 * 1000
 export const IDLE_GAP_MS = 3 * 60 * 1000
@@ -33,7 +33,6 @@ export function createLog({
     // Current foreground window, as last reported by the guest.
     win: null,
     exe: null,
-    tick: null,
     // Input accumulated since the last line was written.
     keys: 0,
     clicks: 0,
@@ -83,13 +82,12 @@ function flushActivity(log, reason) {
 
 // The guest says the foreground window changed. Closes the current span so activity is
 // never attributed to the wrong application.
-export function onWindow(log, { exe, win, tick }, t) {
+export function onWindow(log, { exe, win }, t) {
   if (exe === log.exe && win === log.win) return null
   flushActivity(log, 'window')
   log.exe = exe
   log.win = win
-  log.tick = tick ?? null
-  return push(log, { ev: 'win', t, exe, win, tick: log.tick })
+  return push(log, { ev: 'win', t, exe, win })
 }
 
 // Input happened. Counts are cheap; a line is only written when a span opens, when the
@@ -164,20 +162,26 @@ export function summarise(log) {
   const byExe = new Map()
   let activeMs = 0
   let keys = 0
+  let clicks = 0
+  let wheel = 0
   for (const l of log.lines) {
     if (l.ev !== 'active') continue
     const ms = Math.max(0, l.t - l.from)
     activeMs += ms
     keys += l.keys || 0
+    clicks += l.clicks || 0
+    wheel += l.wheel || 0
     byExe.set(l.exe || '?', (byExe.get(l.exe || '?') || 0) + ms)
   }
   return {
     activeMs,
-    // Input still sitting in the open span counts too: a summary that reads zero while
-    // someone is actively typing is just wrong, even though the span is not written yet.
+    // Written spans plus whatever is still accumulating in the open one. A summary that
+    // reads zero while someone is actively working is just wrong, and counting only the
+    // pending half (which is what clicks and wheel used to do) is wrong the other way:
+    // it reset to nothing every time a span was flushed.
     keys: keys + log.keys,
-    clicks: log.clicks,
-    wheel: log.wheel,
+    clicks: clicks + log.clicks,
+    wheel: wheel + log.wheel,
     open: log.activeSince !== null,
     lines: log.lines.length,
     byExe: Object.fromEntries([...byExe].sort((a, b) => b[1] - a[1])),

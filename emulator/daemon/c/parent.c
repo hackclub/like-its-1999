@@ -35,6 +35,9 @@
 #define DEF_SUPERVISE_EVERY_MS 1000
 #define BACKOFF_MAX_MS 60000
 #define MAX_FAILS 5
+/* How long after a spawn to confirm the child is still there. Long enough to catch a
+ * binary that cannot run at all, short enough that nobody notices. */
+#define DEF_SPAWN_CONFIRM_MS 80
 
 /* Poll fast while a conversation is happening, slowly when nothing is. A push arrives as
  * a burst, so only its first frame ever waits for the slow tick; everything after keeps
@@ -48,6 +51,7 @@ static int ALIVE_STALE_MS = DEF_ALIVE_STALE_MS;
 static int SPAWN_GRACE_MS = DEF_SPAWN_GRACE_MS;
 static int BACKOFF_START_MS = DEF_BACKOFF_START_MS;
 static int SUPERVISE_EVERY_MS = DEF_SUPERVISE_EVERY_MS;
+static int SPAWN_CONFIRM_MS = DEF_SPAWN_CONFIRM_MS;
 
 typedef struct {
   char epoch[MAX_EPOCH];
@@ -132,12 +136,21 @@ static void path_join(char *out, int cap, const char *a, const char *b) {
 
 /* --- sending --------------------------------------------------------------------- */
 
+/* A frame we could not build or encode is a reply somebody is waiting for, and the host can
+ * only see it as silence. It cannot be reported through send_frame itself for obvious
+ * reasons, so it is counted and the next status carries the tally out. */
+static u32 g_dropped_out;
+
 static void send_frame(u8 type, f_builder *b) {
   int plen = f_build_len(b);
   int wlen;
-  if (plen < 0) return; /* nothing we can do, and a dropped frame is always survivable */
+  if (plen < 0) {
+    g_dropped_out++;
+    return;
+  }
   wlen = f_encode(type, out_payload, plen, out_frame, (int)sizeof out_frame);
   if (wlen > 0) p_serial_write(out_frame, wlen);
+  else g_dropped_out++;
 }
 
 static void send_ident(void) {
@@ -160,6 +173,9 @@ static void send_status(const char *code, const char *detail) {
   f_add_str(&b, P.epoch);
   f_add_str(&b, code);
   f_add_str(&b, detail);
+  /* Frames we failed to send, which the host would otherwise only experience as a call that
+   * never came back. Zero in normal operation. */
+  f_add_uint(&b, g_dropped_out);
   send_frame(F_STATUS, &b);
 }
 
@@ -233,15 +249,30 @@ static void try_spawn(void) {
 
   cache_path(path, (int)sizeof path, P.cached_hash);
   if (!p_file_exists(path)) {
+    /* Cached a moment ago and gone now: a disk error, or somebody tidying C:\1999. Saying
+     * so is what turns "tracking stopped" into something diagnosable, and it invites the
+     * host to push again. */
     P.cached_hash[0] = 0;
+    send_status("child-down", "cached binary has vanished");
+    send_ident();
     return;
   }
-  if (p_child_spawn(&P.child, path, 0) != P_OK) {
+  if (p_child_spawn(&P.child, path, 0) == P_OK) {
+    /* "Started" has to mean "still there a moment later". Creating a process succeeds for
+     * plenty of binaries that cannot run: on POSIX the fork always works and the exec
+     * failure surfaces as an immediate exit, and on 9x a PE that loads but is missing an
+     * import dies just as fast. Without this check a push of a broken build reported
+     * success, and on_payload_end would then delete the child that actually worked. */
+    p_sleep(SPAWN_CONFIRM_MS);
+    if (!p_child_alive(&P.child)) P.child_hash[0] = 0;
+  }
+  if (!P.child.running) {
     P.fails++;
     P.backoff = P.backoff ? P.backoff * 2 : BACKOFF_START_MS;
     if (P.backoff > BACKOFF_MAX_MS) P.backoff = BACKOFF_MAX_MS;
     P.next_spawn = p_ticks() + (u32)P.backoff;
-    send_status(P.fails >= MAX_FAILS ? "child-failed" : "child-down", "spawn failed");
+    send_status(P.fails >= MAX_FAILS ? "child-failed" : "child-down",
+                "it would not start");
     return;
   }
   scopy(P.child_hash, P.cached_hash, MAX_HASH);
@@ -263,10 +294,17 @@ static void adopt_cached(f_field *want) {
   char path[MAX_PATH_LEN];
 
   f_field_str(want, hash, MAX_HASH);
-  if (!hash_ok(hash)) return;
-  if (seq(hash, P.cached_hash)) return; /* already running it, or already trying */
+  if (!hash_ok(hash)) {
+    send_status("adopt-skipped", "the announced hash is not a usable name");
+    return;
+  }
+  /* These two are not failures and must stay quiet: the first is the steady state (we are
+   * already running or already trying that build) and the second is the ordinary "we have
+   * never seen this build" that the push exists to fix. Announces arrive every two seconds,
+   * so a status here would be a stream of noise rather than information. */
+  if (seq(hash, P.cached_hash)) return;
   cache_path(path, (int)sizeof path, hash);
-  if (!p_file_exists(path)) return; /* not ours to conjure: the host will push it */
+  if (!p_file_exists(path)) return;
 
   stop_child();
   scopy(P.cached_hash, hash, MAX_HASH);
@@ -426,31 +464,82 @@ static void on_payload_end(f_field *f, int n) {
     return;
   }
 
-  /* A new build gets a fresh start: the old one's failures say nothing about it. */
-  stop_child();
-  /* And the one it replaces goes, so a long run of dev pushes cannot fill the disk with
-   * every build that ever ran. Done after stop_child because Windows will not delete a
-   * running executable. */
-  if (P.cached_hash[0] && !seq(P.cached_hash, P.xfer_hash)) {
-    char old[MAX_PATH_LEN];
-    cache_path(old, (int)sizeof old, P.cached_hash);
-    p_file_delete(old);
+  /* Swap children without burning the bridge.
+   *
+   * The previous binary stays on disk until the new one has actually started, because a
+   * push that transfers perfectly can still fail to spawn, and PROTOCOL.md promises that a
+   * failed push leaves the machine with whatever child it already had. Deleting first meant
+   * a bad build cost all tracking until the next page load. */
+  {
+    char previous[MAX_HASH];
+    scopy(previous, P.cached_hash, MAX_HASH);
+
+    stop_child();
+    scopy(P.cached_hash, P.xfer_hash, MAX_HASH);
+    P.fails = 0;
+    P.backoff = 0;
+    P.next_spawn = p_ticks();
+    xfer_abort();
+    try_spawn();
+
+    if (P.child.running) {
+      /* It works, so the one it replaces goes: a long run of dev pushes would otherwise
+       * fill the disk with every build that ever ran. After the spawn, because Windows
+       * will not delete a running executable. */
+      if (previous[0] && !seq(previous, P.child_hash)) {
+        char old[MAX_PATH_LEN];
+        cache_path(old, (int)sizeof old, previous);
+        p_file_delete(old);
+      }
+    } else if (previous[0] && !seq(previous, P.cached_hash)) {
+      /* Roll back to the child we know starts. try_spawn has already reported the failure;
+       * this says what we did about it. */
+      scopy(P.cached_hash, previous, MAX_HASH);
+      P.fails = 0;
+      P.backoff = 0;
+      P.next_spawn = p_ticks();
+      try_spawn();
+      send_status("push-failed", "new child would not start, kept the previous one");
+    }
   }
-  scopy(P.cached_hash, P.xfer_hash, MAX_HASH);
-  P.fails = 0;
-  P.backoff = 0;
-  P.next_spawn = p_ticks();
-  xfer_abort();
-  try_spawn();
 }
 
 /* --- frames from the host ---------------------------------------------------------- */
 
+/* Hand a frame to the child, and treat a child that will not take it as wedged.
+ *
+ * This is the one place the parent writes into something it does not control. A child that
+ * has stopped reading fills the pipe, and a blocking write there would park the process
+ * that must never stop, unable to read COM1 or to kill the child that wedged it. Two
+ * independent guards: the write end is non-blocking with a deadline (p_child_write), and a
+ * child whose liveness file has gone stale is not written to at all, on the grounds that
+ * something we are about to kill has no business receiving work. */
 static void forward_to_child(const f_frame *fr) {
   int wlen;
   if (!P.child.running) return; /* nothing to forward to; the host knows we are not ready */
+
+  if (!P.child.nonblocking) {
+    /* The platform would not give us a non-blocking pipe, so the liveness file is the only
+     * thing standing between us and an unbounded write. Trust it strictly. */
+    long age = alive_age();
+    if (age < 0 || age > ALIVE_STALE_MS) {
+      stop_child();
+      send_status("child-down", "not reading its pipe");
+      send_ident();
+      return;
+    }
+  }
+
   wlen = f_encode(fr->type, fr->payload, fr->len, out_frame, (int)sizeof out_frame);
-  if (wlen > 0) p_child_write(&P.child, out_frame, wlen);
+  if (wlen <= 0) return;
+  if (p_child_write(&P.child, out_frame, wlen) != P_OK) {
+    /* Either it died mid-write or it stopped draining. Both mean the same thing from here,
+     * and leaving it running would leave a half-frame in its pipe for a child we no longer
+     * believe in. */
+    stop_child();
+    send_status("child-down", "stuck writing to it");
+    send_ident();
+  }
 }
 
 static void on_frame(const f_frame *fr) {
@@ -465,10 +554,15 @@ static void on_frame(const f_frame *fr) {
   n = f_fields(fr->payload, fr->len, f, F_MAX_FIELDS);
 
   if (fr->type == F_RESET) {
-    /* Drop everything provisional. The host sends this on every page load, and a restored
-     * snapshot can leave us mid-anything. */
+    /* Drop everything provisional: a restored snapshot can leave us mid-transfer, and the
+     * host sends this on every page load.
+     *
+     * It deliberately does NOT clear the decoder. The bytes still buffered arrive *after*
+     * this frame, and the host sends RESET and ANNOUNCE back to back in its first tick, so
+     * they routinely land in one read: clearing here threw the announce away and left the
+     * guest silent until the next one two seconds later. Framing recovers from garbage on
+     * its own, which is the whole point of the CRC and the resynchronising decoder. */
     xfer_abort();
-    f_dec_reset(&dec);
     return;
   }
   if (n < 1) return; /* every other frozen message carries at least an epoch */
@@ -523,6 +617,7 @@ static void init(void) {
   SPAWN_GRACE_MS = p_env_int("DAEMON_SPAWN_GRACE_MS", DEF_SPAWN_GRACE_MS);
   BACKOFF_START_MS = p_env_int("DAEMON_BACKOFF_MS", DEF_BACKOFF_START_MS);
   SUPERVISE_EVERY_MS = p_env_int("DAEMON_SUPERVISE_MS", DEF_SUPERVISE_EVERY_MS);
+  SPAWN_CONFIRM_MS = p_env_int("DAEMON_SPAWN_CONFIRM_MS", DEF_SPAWN_CONFIRM_MS);
   p_child_init(&P.child);
   p_base_dir(P.base, MAX_PATH_LEN);
   p_dir_make(P.base);

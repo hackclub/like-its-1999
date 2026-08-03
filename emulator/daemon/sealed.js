@@ -61,8 +61,10 @@ const deriveAesKey = (privateKey, publicKey, usage) =>
     [usage]
   )
 
-// Encrypt `bytes` to `recipientPublicKey`. Returns { header, body }: the header belongs in
-// the chunk's metadata (it is not secret) and the body is the ciphertext.
+// Encrypt `bytes` to `recipientPublicKey`. Returns `{ seal, body }`: `seal` is the public
+// part that belongs in the chunk's metadata (it is not secret) and `body` is the ciphertext.
+// The field is named for where it ends up, because the one time it was called `header` here
+// and `seal` there, the two never met and every sealed chunk was written undecryptable.
 export async function seal(bytes, recipientPublicKey, { keyId = 'hb1' } = {}) {
   const ephemeral = await subtle().generateKey(CURVE, true, ['deriveKey'])
   const key = await deriveAesKey(
@@ -74,7 +76,7 @@ export async function seal(bytes, recipientPublicKey, { keyId = 'hb1' } = {}) {
   const ct = await subtle().encrypt({ name: 'AES-GCM', iv }, key, bytes)
   const epk = await subtle().exportKey('spki', ephemeral.publicKey)
   return {
-    header: { alg: ALG, keyId, epk: b64(epk), iv: b64(iv) },
+    seal: { alg: ALG, keyId, epk: b64(epk), iv: b64(iv) },
     body: new Uint8Array(ct),
   }
 }
@@ -82,7 +84,7 @@ export async function seal(bytes, recipientPublicKey, { keyId = 'hb1' } = {}) {
 // Open a sealed body with the recipient private key. Throws on a wrong key or tampered
 // bytes — AES-GCM authenticates, so this fails loudly rather than returning garbage, which
 // is the property that makes the ciphertext worth hashing and signing.
-export async function unseal({ header, body }, recipientPrivateKey) {
+export async function unseal({ seal: header, body }, recipientPrivateKey) {
   if (!header || header.alg !== ALG)
     throw new Error(`unknown seal algorithm ${header?.alg}`)
   const epk = await subtle().importKey(
@@ -104,6 +106,7 @@ export async function unseal({ header, body }, recipientPrivateKey) {
 // The public key the page seals to. Committed rather than configured: it is public by
 // definition, and a build that cannot find it should fail loudly rather than quietly
 // writing readable logs.
-export const RECIPIENT_PUBLIC_KEY_B64 = ''
+export const RECIPIENT_PUBLIC_KEY_B64 =
+  'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2MCanU5X0yVhgfhXvyGiO4nHFRBlvyff08xN8+62rDCvly29h34jwBWZAP33gGw2RQ4KLXBws05IH+MQ7OuAQw=='
 
 export const hasRecipientKey = () => RECIPIENT_PUBLIC_KEY_B64.length > 0

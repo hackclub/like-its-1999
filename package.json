@@ -4,7 +4,8 @@
     "dev": "vite --port 5173 --strictPort",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test --test-timeout=40000 emulator/*.test.mjs emulator/daemon/*.test.mjs",
+    "pretest": "./scripts/build-daemon.sh host",
+    "test": "node --test --test-timeout=40000 emulator/*.test.mjs emulator/daemon/*.test.mjs api/*.test.mjs",
     "daemon": "./scripts/build-daemon.sh",
     "daemon:iso": "node scripts/daemon-iso.mjs"
   },
