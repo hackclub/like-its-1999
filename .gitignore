@@ -14,3 +14,6 @@ dist/
 emulator/images/
 public/images/
 public/vm/
+
+# Host-only C test binaries (the guest ones in emulator/daemon/bin/ are committed)
+emulator/daemon/build/

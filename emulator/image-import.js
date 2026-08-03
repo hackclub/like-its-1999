@@ -32,7 +32,8 @@ function clampedSize(width, height) {
 function canvasToBlob(canvas, type, quality) {
   return new Promise((resolve, reject) =>
     canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('image encode failed'))),
+      (blob) =>
+        blob ? resolve(blob) : reject(new Error('image encode failed')),
       type,
       quality
     )
@@ -62,7 +63,10 @@ async function reencodeStill(file) {
     asPng ? 'image/png' : 'image/jpeg',
     asPng ? undefined : 0.9
   )
-  return { ext: asPng ? 'PNG' : 'JPG', data: new Uint8Array(await blob.arrayBuffer()) }
+  return {
+    ext: asPng ? 'PNG' : 'JPG',
+    data: new Uint8Array(await blob.arrayBuffer()),
+  }
 }
 
 function readRect(src, srcWidth, x, y, w, h) {
@@ -135,7 +139,14 @@ function reencodeGif(file, bytes) {
     // it's drawn, so it can be put back after this frame's delay elapses.
     const saved =
       frame.disposal === 3
-        ? readRect(composite, width, frame.x, frame.y, frame.width, frame.height)
+        ? readRect(
+            composite,
+            width,
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height
+          )
         : null
 
     reader.decodeAndBlitFrameRGBA(i, composite)
@@ -145,7 +156,15 @@ function reencodeGif(file, bytes) {
     if (frame.disposal === 2) {
       clearRect(composite, width, frame.x, frame.y, frame.width, frame.height)
     } else if (frame.disposal === 3) {
-      writeRect(composite, width, frame.x, frame.y, frame.width, frame.height, saved)
+      writeRect(
+        composite,
+        width,
+        frame.x,
+        frame.y,
+        frame.width,
+        frame.height,
+        saved
+      )
     }
   }
 
@@ -153,11 +172,18 @@ function reencodeGif(file, bytes) {
   const frames =
     out.width === width && out.height === height
       ? composited
-      : composited.map((f) => downscaleRGBA(f, width, height, out.width, out.height))
+      : composited.map((f) =>
+          downscaleRGBA(f, width, height, out.width, out.height)
+        )
 
-  const allPixels = new Uint8ClampedArray(frames.length * out.width * out.height * 4)
+  const allPixels = new Uint8ClampedArray(
+    frames.length * out.width * out.height * 4
+  )
   frames.forEach((frame, i) => allPixels.set(frame, i * frame.length))
-  const palette = quantize(allPixels, 256, { format: 'rgba4444', oneBitAlpha: true })
+  const palette = quantize(allPixels, 256, {
+    format: 'rgba4444',
+    oneBitAlpha: true,
+  })
   const transparentIndex = palette.findIndex((c) => c[3] === 0)
 
   const gif = GIFEncoder()

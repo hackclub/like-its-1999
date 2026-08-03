@@ -40,8 +40,15 @@ function reencodeMidi(file, bytes) {
   } catch {
     throw new Error(`"${file.name}" is not a decodable MIDI file`)
   }
-  const DROP = new Set(['sysEx', 'endSysEx', 'sequencerSpecific', 'unknownMeta'])
-  parsed.tracks = parsed.tracks.map((track) => track.filter((e) => !DROP.has(e.type)))
+  const DROP = new Set([
+    'sysEx',
+    'endSysEx',
+    'sequencerSpecific',
+    'unknownMeta',
+  ])
+  parsed.tracks = parsed.tracks.map((track) =>
+    track.filter((e) => !DROP.has(e.type))
+  )
   return { ext: 'MID', data: new Uint8Array(writeMidi(parsed)) }
 }
 
@@ -100,7 +107,10 @@ async function reencodeAudio(file, bytes) {
   source.start(0)
   const rendered = await offline.startRendering() // resamples + downmixes to mono
 
-  return { ext: 'WAV', data: encodeWav(rendered.getChannelData(0), SAMPLE_RATE) }
+  return {
+    ext: 'WAV',
+    data: encodeWav(rendered.getChannelData(0), SAMPLE_RATE),
+  }
 }
 
 // Re-encode one File as audio/MIDI. Returns { ext, data }; throws if it won't

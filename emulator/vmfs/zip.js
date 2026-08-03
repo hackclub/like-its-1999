@@ -10,7 +10,8 @@ export async function zipTree(fs, tree, { compress = true } = {}) {
   const files = {}
   const rootName = tree.name && tree.name !== '/' ? tree.name : 'root'
   const add = async (node, prefix) => {
-    for (const f of node.files) files[`${prefix}/${f.name}`] = await fs.readFile(f.path)
+    for (const f of node.files)
+      files[`${prefix}/${f.name}`] = await fs.readFile(f.path)
     for (const d of node.dirs) await add(d, `${prefix}/${d.name}`)
   }
   await add(tree, rootName)

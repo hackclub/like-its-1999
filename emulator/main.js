@@ -28,6 +28,17 @@ import {
   sessionFrom,
   applySave,
 } from './session.js'
+import { createLink } from './daemon/link.js'
+import { installDebug } from './debug.js'
+import { loadDaemon } from './daemon/build.js'
+import { toNdjson } from './daemon/tracking.js'
+import {
+  seal,
+  importPublicKey,
+  hasRecipientKey,
+  RECIPIENT_PUBLIC_KEY_B64,
+} from './daemon/sealed.js'
+import { sha256hex } from './savefile.js'
 import { createFileBrowser, openLiveFs } from './vmfs/filebrowser.js'
 import { createCdromControl } from './cdrom-ui.js'
 import { installAtapiCdromFix } from './cdrom-atapi-fix.js'
@@ -175,6 +186,75 @@ emulator.add_listener('download-progress', (e) => {
   )
 })
 
+// --- tracking -------------------------------------------------------------------
+// Talk to the in-guest agent over COM1 and record what the machine was doing. Every world
+// shipped so far has no agent at all, so `absent` is the normal, healthy outcome here and
+// must stay quiet: the log still records input and the page still works.
+//
+// An image with the daemon installed answers, and usually already has the child we want
+// cached, in which case nothing is transferred at all. A push only happens when the build
+// has changed.
+let trackingState = 'idle'
+// Fetched rather than imported: the hash is derived from the bytes, and a build with no
+// agent binary is a normal state that must not stop the page.
+const daemonBuild = await loadDaemon()
+const link = createLink({
+  emulator,
+  epoch: instanceId,
+  instanceId,
+  wantHash: daemonBuild.hash,
+  wantBytes: daemonBuild.bytes,
+  onState: (state) => {
+    trackingState = state
+    if (state === 'ready') setStatus(`${bootNote || 'tracking on'}`)
+  },
+})
+
+// Seal this instance's log for the container. Encryption keeps window titles (file names,
+// paths) out of an artifact participants publish; the signature anchors when the bytes
+// existed. Both are best-effort: a save must never fail because a key is missing or the
+// signing endpoint is down, so either one falling through just means a less provable log.
+async function sealTracking() {
+  if (!hasRecipientKey()) return null
+  const lines = toNdjson(link.seal())
+  if (!lines) return null
+  try {
+    const gz = await gzipBytes(new TextEncoder().encode(lines))
+    const sealed = await seal(
+      gz,
+      await importPublicKey(RECIPIENT_PUBLIC_KEY_B64)
+    )
+    return { ...sealed, ...(await countersign(sealed.body)) }
+  } catch (e) {
+    console.warn('could not seal the tracking log:', e.message)
+    return null
+  }
+}
+
+const gzipBytes = async (bytes) =>
+  new Uint8Array(
+    await new Response(
+      new Response(bytes).body.pipeThrough(new CompressionStream('gzip'))
+    ).arrayBuffer()
+  )
+
+// Ask the server to countersign the ciphertext hash. Offline, or no endpoint deployed, is
+// an ordinary outcome rather than an error.
+async function countersign(body) {
+  try {
+    const resp = await fetch('/api/sign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha256: await sha256hex(body) }),
+    })
+    if (!resp.ok) return {}
+    const { keyId, signedAt, sig } = await resp.json()
+    return { sig, signedAt, sigKeyId: keyId }
+  } catch {
+    return {}
+  }
+}
+
 // Integer scaling: Win98 is pixel art, so we draw it at the largest whole number
 // of DEVICE pixels per guest pixel that fits — crisp, no mushy fractional scaling.
 //
@@ -252,21 +332,25 @@ const $ = (id) => document.getElementById(id)
 const clock = () =>
   new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
-// Everything the container needs besides the RAM image. Tracking data lands here once
-// the in-guest daemon exists (see daemon/PROTOCOL.md); until then a save still carries
-// the world, the thumbnail and the provenance chain.
+// Everything the container needs besides the RAM image: the world, the provenance chain,
+// the thumbnail, and this instance's tracking log.
 //
 // The thumbnail is captured only for deliberate saves. An autosave skips it: the
 // pagehide/beforeunload path is a race against the tab closing, and rendering plus
 // PNG-encoding a frame there is exactly the wrong place to spend time (the canvas is
 // often already gone by then anyway). Skipping it is free — packSession carries the
 // previous container's thumbnail through untouched when we don't supply a new one.
+//
+// The tracking log is sealed on every save, including autosaves, because unlike the
+// thumbnail it has changed since the last one and the previous chunk is this instance's
+// own: rewriting it loses the newest spans rather than preserving anything.
 const saveOptions = async ({ withThumb = true, expectGen } = {}) => ({
   world,
   prior: session.prior,
   instanceId,
   expectGen,
   thumb: withThumb ? await captureScreen({ maxWidth: THUMB_WIDTH }) : null,
+  hb: await sealTracking(),
 })
 
 let saving = false
@@ -541,7 +625,11 @@ const topDoc = (() => {
   }
 })()
 topDoc.addEventListener('visibilitychange', () => {
-  if (topDoc.visibilityState === 'hidden') doSave('autosaved', { auto: true })
+  const hidden = topDoc.visibilityState === 'hidden'
+  // Recorded rather than acted on: whether a hidden tab's time counts is a policy question
+  // for whatever tallies hours later, and a hidden tab barely executes the guest anyway.
+  link.visibility(!hidden)
+  if (hidden) doSave('autosaved', { auto: true })
 })
 window.addEventListener('pagehide', () => doSave('autosaved', { auto: true }))
 
@@ -564,6 +652,13 @@ topWin.addEventListener('beforeunload', (e) => {
   e.returnValue = ''
 })
 
-// Expose for poking around in the console during development.
-window.emulator = emulator
-window.like99 = { world, params, instanceId, save: () => doSave('saved') }
+// Expose for poking around in the console. The surface, and what is gated to dev, is in
+// debug.js; it exists because driving this machine from a console is how it gets debugged.
+window.like99 = installDebug({
+  emulator,
+  link,
+  world,
+  params,
+  instanceId,
+  save: () => doSave('saved'),
+})

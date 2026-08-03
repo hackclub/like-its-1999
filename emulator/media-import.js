@@ -30,7 +30,9 @@ function reencodeOne(file) {
   if (IMAGE_EXTS.has(ext)) return reencodeImage(file)
   if (AUDIO_EXTS.has(ext)) return reencodeAudioFile(file)
   if (FONT_EXTS.has(ext)) return reencodeFont(file, ext)
-  return Promise.reject(new Error(`"${file.name}" is not a supported file type`))
+  return Promise.reject(
+    new Error(`"${file.name}" is not a supported file type`)
+  )
 }
 
 // Re-encode a list of File objects and pack them into an ISO9660 image ready for

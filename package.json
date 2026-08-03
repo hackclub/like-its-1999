@@ -1,11 +1,12 @@
 {
   "private": true,
   "scripts": {
-    "fetch-image": "bash scripts/fetch-image.sh",
-    "dev": "vite",
+    "dev": "vite --port 5173 --strictPort",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test --test-timeout=15000 emulator/*.test.mjs"
+    "test": "node --test --test-timeout=40000 emulator/*.test.mjs emulator/daemon/*.test.mjs",
+    "daemon": "./scripts/build-daemon.sh",
+    "daemon:iso": "node scripts/daemon-iso.mjs"
   },
   "keywords": [],
   "author": "",

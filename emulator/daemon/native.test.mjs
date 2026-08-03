@@ -1,0 +1,420 @@
+// node --test emulator/daemon/native.test.mjs
+//
+// The real C parent, driven by the real host code. `fakeguest.mjs` proves the host copes
+// with a guest that misbehaves; this proves the guest we actually ship agrees with it.
+//
+// The parent's serial port is stdin/stdout on POSIX, so the whole conversation runs over a
+// pipe with no VM involved. What that buys is coverage of the parts that exist only in C
+// and were otherwise reachable only by hand in Windows 98: spawning a child, noticing it
+// die, noticing it hang, backing off, and writing a pushed binary to disk.
+//
+// Needs the host binaries: scripts/build-daemon.sh host
+
+import { test, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import {
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  writeFileSync,
+  readdirSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { readFile } from 'node:fs/promises'
+
+import { createLink } from './link.js'
+
+const here = new URL('.', import.meta.url).pathname
+const PARENT = join(here, 'build/daemon')
+const CHILD = join(here, 'build/child')
+const have = existsSync(PARENT) && existsSync(CHILD)
+
+// The supervision timeouts are compressed so the hang path is testable in a second rather
+// than half a minute. Nothing sets these in production.
+const FAST = {
+  DAEMON_ALIVE_STALE_MS: '600',
+  DAEMON_ALIVE_EVERY_MS: '100',
+  DAEMON_SPAWN_GRACE_MS: '200',
+  DAEMON_BACKOFF_MS: '100',
+  DAEMON_SUPERVISE_MS: '100',
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// Wait for a condition, polling, so tests never depend on a fixed sleep being long enough.
+async function until(what, fn, timeout = 8000) {
+  const t0 = Date.now()
+  for (;;) {
+    const v = await fn()
+    if (v) return v
+    if (Date.now() - t0 > timeout)
+      throw new Error(`timed out waiting for ${what}`)
+    await sleep(25)
+  }
+}
+
+// An emulator-shaped object over a child process, so link.js drives the real binary
+// exactly as it drives v86: bytes out through serial_send_bytes, bytes in one at a time.
+function attach(proc) {
+  const listeners = new Map()
+  proc.stdout.on('data', (buf) => {
+    for (const byte of buf)
+      for (const fn of listeners.get('serial0-output-byte') || []) fn(byte)
+  })
+  return {
+    add_listener: (name, fn) =>
+      listeners.set(name, [...(listeners.get(name) || []), fn]),
+    // Input counters register here in the real thing; nothing sends them in this test.
+    bus: { pair: { register: () => {} } },
+    serial_send_bytes: (_port, bytes) => proc.stdin.write(Buffer.from(bytes)),
+  }
+}
+
+let dir
+let procs = []
+
+function startParent(env = {}) {
+  const proc = spawn(PARENT, [], {
+    env: { ...process.env, DAEMON_DIR: dir, ...FAST, ...env },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  proc.stderr.resume() // p_log output; ignored unless a test is being debugged
+  procs.push(proc)
+  return proc
+}
+
+before(() => {
+  dir = mkdtempSync(join(tmpdir(), 'daemon-native-'))
+})
+
+after(() => {
+  for (const p of procs) p.kill('SIGKILL')
+  if (dir) rmSync(dir, { recursive: true, force: true })
+})
+
+const childBytes = async () => new Uint8Array(await readFile(CHILD))
+
+// Bring up a parent, hand it the child, and wait until the host says it is ready.
+async function ready(t, { hash = 'testhash1', push = true } = {}) {
+  const proc = startParent()
+  const bytes = push ? await childBytes() : null
+  const link = createLink({
+    emulator: attach(proc),
+    epoch: `e-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+    instanceId: 'i1',
+    wantHash: hash,
+    wantBytes: bytes,
+  })
+  t.after(() => {
+    link.stop()
+    proc.kill('SIGKILL')
+  })
+  return { proc, link }
+}
+
+test(
+  'the parent identifies itself, then runs a child we push',
+  { skip: !have && 'run scripts/build-daemon.sh host' },
+  async (t) => {
+    const { link } = await ready(t)
+
+    await until('parent to answer', () => link.agent.role !== null)
+    await until('a running child', () => link.state === 'ready')
+    assert.equal(link.agent.hash, 'testhash1')
+    assert.ok(link.agent.caps.includes('win'), 'caps came back')
+
+    // The binary really did land on disk under its hash.
+    const cached = readdirSync(join(dir, 'CACHE'))
+    assert.deepEqual(cached, ['testhash1.EXE'])
+  }
+)
+
+test(
+  'a pushed binary is byte-identical on the other side',
+  { skip: !have && 'build first' },
+  async (t) => {
+    await ready(t, { hash: 'exacthash' })
+    await until('the file to be written', () =>
+      existsSync(join(dir, 'CACHE/exacthash.EXE'))
+    )
+    const written = new Uint8Array(
+      await readFile(join(dir, 'CACHE/exacthash.EXE'))
+    )
+    assert.deepEqual(
+      written,
+      await childBytes(),
+      'chunked transfer lost nothing'
+    )
+  }
+)
+
+test(
+  'calls round trip through the real child',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const { link } = await ready(t, { hash: 'callhash' })
+    await until('ready', () => link.state === 'ready')
+
+    const health = await link.call('health')
+    assert.equal(health[0], '0.1', 'version')
+    assert.ok(Number(health[1]) >= 0, 'uptime is a number')
+
+    const [code, out] = await link.call('exec', ['echo hello-from-the-guest'])
+    assert.equal(code, '0')
+    assert.match(out, /hello-from-the-guest/)
+
+    await assert.rejects(() => link.call('nosuchthing'), /no such function/)
+  }
+)
+
+test(
+  'a foreground change arrives as an event and lands in the log',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const { link } = await ready(t, { hash: 'winhash' })
+    await until('ready', () => link.state === 'ready')
+
+    // The POSIX child reads its "foreground window" from a file, so a test can move it.
+    writeFileSync(
+      join(dir, 'FOREGROUND'),
+      'EDITPLUS.EXE\nindex.html - EditPlus\n'
+    )
+    // Not "the first win line": the connection primes itself with a getForeground the
+    // moment a child appears, so before this file existed there may already be a line
+    // recording that Windows had no foreground window at all, which is true and useful.
+    const wins = () => link.log.lines.filter((l) => l.ev === 'win')
+    const line = await until(
+      'a win event for EditPlus',
+      () => wins().find((l) => l.exe === 'EDITPLUS.EXE'),
+      15000
+    )
+    assert.equal(line.win, 'index.html - EditPlus')
+
+    // And a second change is reported, while an unchanged poll is not.
+    writeFileSync(join(dir, 'FOREGROUND'), 'PSP.EXE\nPaint Shop Pro\n')
+    await until(
+      'the second window',
+      () => wins().some((l) => l.exe === 'PSP.EXE'),
+      15000
+    )
+    const count = wins().length
+    await sleep(1200)
+    assert.equal(
+      wins().length,
+      count,
+      'polling the same window does not spam the log'
+    )
+  }
+)
+
+test(
+  'a child that dies is noticed and replaced',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const { link } = await ready(t, { hash: 'diehash' })
+    await until('ready', () => link.state === 'ready')
+
+    // Make the child kill itself: $PPID inside its shell is the child process.
+    await link.call('exec', ['kill -9 $PPID']).catch(() => {})
+
+    await until('the death to be reported', () =>
+      link.agent.statuses.some((s) => s.code === 'child-down')
+    )
+    // The parent re-identifies, the host pushes again, and it comes back by itself.
+    await until('recovery', () => link.state === 'ready', 15000)
+  }
+)
+
+test(
+  'a hung child is killed and restarted, which a process handle alone cannot catch',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const { link } = await ready(t, { hash: 'hanghash' })
+    await until('ready', () => link.state === 'ready')
+
+    // SIGSTOP leaves the process alive and its handle valid, but it stops touching ALIVE —
+    // exactly the failure the liveness file exists for.
+    const [, pidOut] = await link.call('exec', ['echo $PPID'])
+    const childPid = Number(String(pidOut).trim())
+    assert.ok(childPid > 0, 'found the child pid')
+    process.kill(childPid, 'SIGSTOP')
+    t.after(() => {
+      try {
+        process.kill(childPid, 'SIGKILL')
+      } catch {}
+    })
+
+    await until(
+      'the liveness timeout to fire',
+      () => link.agent.statuses.some((s) => s.detail === 'liveness timeout'),
+      15000
+    )
+    await until('a fresh child', () => link.state === 'ready', 15000)
+  }
+)
+
+test(
+  'a short payload is refused and the machine stays usable',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const proc = startParent()
+    const link = createLink({
+      emulator: attach(proc),
+      epoch: 'e-short',
+      instanceId: 'i1',
+      wantHash: 'shorthash',
+      wantBytes: null, // nothing to push: we will do it by hand, badly
+    })
+    t.after(() => {
+      link.stop()
+      proc.kill('SIGKILL')
+    })
+    await until('parent', () => link.agent.role === 'parent')
+
+    // Claim more bytes than we send, then end the transfer.
+    const { encode, TYPES } = await import('./frame.js')
+    const send = (type, fields) =>
+      proc.stdin.write(Buffer.from(encode(type, fields)))
+    send(TYPES.PAYLOAD_BEGIN, ['e-short', 'shorthash', '9999'])
+    send(TYPES.PAYLOAD_DATA, ['e-short', '0', new Uint8Array(10)])
+    send(TYPES.PAYLOAD_END, ['e-short', 'shorthash'])
+
+    await until('a refusal', () =>
+      link.agent.statuses.some((s) => s.code === 'push-failed')
+    )
+    assert.equal(link.state, 'parent', 'and no child was started')
+    assert.ok(
+      !existsSync(join(dir, 'CACHE/shorthash.EXE')),
+      'nothing was written'
+    )
+
+    // Still healthy: a real exchange works immediately afterwards.
+    send(TYPES.PING, ['e-short', '77'])
+    await until(
+      'the connection to still work',
+      () => link.agent.lastHeard !== null
+    )
+  }
+)
+
+test(
+  'stray payload frames and junk bytes are ignored',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const { proc, link } = await ready(t, { hash: 'junkhash' })
+    await until('ready', () => link.state === 'ready')
+
+    const { encode, TYPES } = await import('./frame.js')
+    // Garbage, a sync word that leads nowhere, and payload frames with no BEGIN.
+    proc.stdin.write(Buffer.from([0, 1, 2, 0x39, 0x39, 0xff, 0xff, 0xff, 0xff]))
+    proc.stdin.write(
+      Buffer.from(encode(TYPES.PAYLOAD_DATA, ['e', '0', new Uint8Array(4)]))
+    )
+    proc.stdin.write(Buffer.from(encode(TYPES.PAYLOAD_END, ['e', 'nope'])))
+
+    await sleep(300)
+    assert.equal(link.state, 'ready', 'still connected')
+    const health = await link.call('health')
+    assert.equal(health[0], '0.1', 'and still answering')
+  }
+)
+
+test(
+  'a build already in the cache starts without anything crossing the wire',
+  { skip: !have && 'build first' },
+  async (t) => {
+    // The common case, and the reason this path exists: a page reload, or a guest reboot
+    // under an unchanged page, used to re-push the whole child through a 512-byte acked
+    // window every time. A restarted parent has forgotten its cache, so the wanted hash on
+    // the announce is what tells it what to look for.
+    const { link: first } = await ready(t, { hash: 'cachedbuild' })
+    await until('the first parent to run it', () => first.state === 'ready')
+    first.stop()
+
+    // A second parent over the same directory, and this time the host offers no bytes.
+    const proc = startParent()
+    const emu = attach(proc)
+    const send = emu.serial_send_bytes
+    let sent = 0
+    emu.serial_send_bytes = (port, bytes) => {
+      sent += bytes.length
+      return send(port, bytes)
+    }
+    const link = createLink({
+      emulator: emu,
+      epoch: 'e-cached',
+      instanceId: 'i1',
+      wantHash: 'cachedbuild',
+      wantBytes: null,
+    })
+    t.after(() => {
+      link.stop()
+      proc.kill('SIGKILL')
+    })
+
+    await until('the cached child to come up', () => link.state === 'ready')
+    assert.equal(link.agent.hash, 'cachedbuild')
+    assert.ok(sent < 512, `nothing substantial was sent (${sent} bytes)`)
+  }
+)
+
+test(
+  'a hash that could name a path is refused',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const { proc, link } = await ready(t, { hash: 'pathhash' })
+    await until('ready', () => link.state === 'ready')
+
+    const { encode, TYPES } = await import('./frame.js')
+    proc.stdin.write(
+      Buffer.from(
+        encode(TYPES.PAYLOAD_BEGIN, [link.agent.epoch, '..\\evil', '4'])
+      )
+    )
+    await until('the refusal', () =>
+      link.agent.statuses.some((s) => s.detail === 'bad hash')
+    )
+    assert.equal(link.state, 'ready', 'still connected')
+    assert.deepEqual(
+      readdirSync(join(dir, 'CACHE')).filter((f) => f.includes('evil')),
+      []
+    )
+  }
+)
+
+test(
+  'pushing the build that is already running leaves the child alone',
+  { skip: !have && 'build first' },
+  async (t) => {
+    const { proc, link } = await ready(t, { hash: 'samehash' })
+    await until('ready', () => link.state === 'ready')
+    const [, uptime] = await link.call('health')
+
+    // Framed by hand, because the host refuses to re-push a hash it believes is running and
+    // this is about the guest surviving it anyway: after a `child-down` the host clears that
+    // belief and pushes, while the parent may already be respawning from its cache. The
+    // bytes are irrelevant, which is the point — nothing should be written or restarted.
+    const { encode, TYPES } = await import('./frame.js')
+    const e = link.agent.epoch
+    const junk = Uint8Array.of(1, 2, 3, 4)
+    proc.stdin.write(
+      Buffer.concat([
+        Buffer.from(encode(TYPES.PAYLOAD_BEGIN, [e, 'samehash', '4'])),
+        Buffer.from(encode(TYPES.PAYLOAD_DATA, [e, '0', junk])),
+        Buffer.from(encode(TYPES.PAYLOAD_END, [e, 'samehash'])),
+      ])
+    )
+
+    await until('the parent to say so', () =>
+      link.agent.statuses.some((s) => s.code === 'push-ignored')
+    )
+    assert.equal(link.state, 'ready')
+    const [, later] = await link.call('health')
+    assert.ok(
+      Number(later) >= Number(uptime),
+      'the same child is still running, not a fresh one'
+    )
+  }
+)

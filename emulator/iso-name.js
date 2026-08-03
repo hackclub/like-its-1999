@@ -3,7 +3,11 @@
 // differ past character 8 (or in case) don't collide.
 export function uniqueBaseName(originalName, used) {
   const stem = originalName.replace(/\.[^.]*$/, '')
-  let base = stem.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 8) || 'FILE'
+  let base =
+    stem
+      .toUpperCase()
+      .replace(/[^A-Z0-9_]/g, '_')
+      .slice(0, 8) || 'FILE'
   let candidate = base
   let n = 1
   while (used.has(candidate)) {

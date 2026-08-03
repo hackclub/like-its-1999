@@ -134,10 +134,17 @@ function isoFileName(name) {
 
 // Build a flat, single-directory ISO9660 image.
 // `files`: [{ name: string, data: Uint8Array }, ...] — at least one entry required.
-export function buildIso9660({ volumeLabel = 'DATA', files, date = new Date() }) {
+export function buildIso9660({
+  volumeLabel = 'DATA',
+  files,
+  date = new Date(),
+}) {
   if (!files?.length) throw new Error('buildIso9660: no files given')
 
-  const label = volumeLabel.toUpperCase().replace(/[^A-Z0-9_]/g, '_').slice(0, 32)
+  const label = volumeLabel
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, '_')
+    .slice(0, 32)
   const sorted = [...files]
     .map((f) => ({ name: isoFileName(f.name), data: f.data }))
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -159,7 +166,9 @@ export function buildIso9660({ volumeLabel = 'DATA', files, date = new Date() })
   const fileDataSizes = sorted.map((f) => f.data.length)
   const selfParentLen = 34 * 2
   const fileRecordLens = sorted.map(
-    (f) => dirRecord({ nameStr: f.name, isDir: false, lba: 0, length: 0, date }).length
+    (f) =>
+      dirRecord({ nameStr: f.name, isDir: false, lba: 0, length: 0, date })
+        .length
   )
   const rootDirUnpaddedLen =
     selfParentLen + fileRecordLens.reduce((a, b) => a + b, 0)

@@ -251,14 +251,7 @@ function nextProvenance(prior, world, instanceId) {
 // a future build add sections without this one destroying them.
 async function packSession(
   emulator,
-  {
-    world,
-    prior = null,
-    heartbeats = null,
-    thumb = null,
-    instanceId,
-    tracking = {},
-  }
+  { world, prior = null, hb = null, thumb = null, instanceId, tracking = {} }
 ) {
   const state = new Uint8Array(await emulator.save_state())
   const priorMeta = prior?.meta ?? {}
@@ -266,19 +259,28 @@ async function packSession(
 
   const chunks = [{ id: 'state', bytes: state }]
 
-  if (heartbeats?.length) {
-    generated.add('heartbeats')
+  // The tracking log, sealed and countersigned by the time it gets here (see
+  // daemon/sealed.js). One chunk per instance, never rewritten by anyone else: one saved
+  // machine can be restored many times, and each fork appending to a shared chunk is how
+  // logs get silently clobbered or double-counted.
+  if (hb?.body?.length) {
+    const id = `hb/${instanceId}`
+    generated.add(id)
     chunks.push({
-      id: 'heartbeats',
-      bytes:
-        heartbeats instanceof Uint8Array
-          ? heartbeats
-          : new TextEncoder().encode(heartbeats),
-      // Hash the tracking data: it's small, and it's the one chunk whose integrity
-      // someone may have to argue about months later. The 65 MB state is left unhashed
-      // because that cost lands on every autosave.
+      id,
+      bytes: hb.body,
+      codec: 'raw', // already gzipped, then encrypted; gzip again would only add bytes
+      // Hash it: this is the chunk whose integrity someone may have to argue about months
+      // later, and the signature covers exactly this hash. The 65 MB state stays unhashed
+      // because that cost would land on every autosave.
       hash: true,
-      extra: { format: 'ndjson' },
+      extra: {
+        format: 'ndjson+gzip+sealed',
+        seal: hb.seal,
+        sig: hb.sig ?? null,
+        signedAt: hb.signedAt ?? null,
+        sigKeyId: hb.sigKeyId ?? null,
+      },
     })
   }
   if (thumb) {

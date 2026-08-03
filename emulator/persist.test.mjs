@@ -346,32 +346,64 @@ test('clearing one world leaves the others alone', async () => {
 test('a save carries forward chunks and metadata it was not given again', async () => {
   // Same guarantee as the format test, but through the storage path a real autosave takes.
   const thumb = te.encode('pretend png bytes')
+  const sealed = te.encode('pretend ciphertext')
   const first = await saveSession(
     fakeEmulator(),
     opts(legacyWorld, {
       thumb,
-      heartbeats: '{"t":1,"win":"EditPlus"}\n',
+      hb: { body: sealed, seal: { alg: 'ECIES-P256-AES256GCM' }, sig: 'sig1' },
     })
   )
-  assert.deepEqual(first.save.chunkIds.sort(), ['heartbeats', 'state', 'thumb'])
+  assert.deepEqual(first.save.chunkIds.sort(), [
+    'hb/instance-1',
+    'state',
+    'thumb',
+  ])
 
-  // An autosave: no thumbnail, no heartbeats supplied.
+  // An autosave: no thumbnail, no tracking data supplied.
   const second = await saveSession(
     fakeEmulator(4096),
     opts(legacyWorld, { prior: first.save, expectGen: first.gen })
   )
   assert.deepEqual(second.save.chunkIds.sort(), [
-    'heartbeats',
+    'hb/instance-1',
     'state',
     'thumb',
   ])
   assert.deepEqual(await second.save.chunk('thumb'), thumb)
   assert.equal(second.save.meta.id, first.save.meta.id, 'same file identity')
-  assert.equal(
-    (await second.save.ndjson('heartbeats'))[0].win,
-    'EditPlus',
-    'tracking data survives an autosave that knows nothing about it'
+  assert.deepEqual(
+    await second.save.chunk('hb/instance-1'),
+    sealed,
+    'the sealed log survives an autosave that knows nothing about it'
   )
+  const entry = second.save.chunkEntry('hb/instance-1')
+  assert.equal(entry.sig, 'sig1', 'and so does its signature')
+  assert.match(entry.sha256, /^[0-9a-f]{64}$/, 'the signed hash is recorded')
+})
+
+test('each instance writes its own tracking chunk and never rewrites another', async () => {
+  // One saved machine restored twice: the forks must not clobber each other, which is what
+  // per-instance chunk ids buy.
+  const one = await saveSession(
+    fakeEmulator(),
+    opts(legacyWorld, {
+      instanceId: 'i-A',
+      hb: { body: te.encode('log A'), seal: { alg: 'x' } },
+    })
+  )
+  const two = await saveSession(
+    fakeEmulator(4096),
+    opts(legacyWorld, {
+      instanceId: 'i-B',
+      prior: one.save,
+      expectGen: one.gen,
+      hb: { body: te.encode('log B'), seal: { alg: 'x' } },
+    })
+  )
+  assert.deepEqual(two.save.chunkIds.sort(), ['hb/i-A', 'hb/i-B', 'state'])
+  assert.deepEqual(await two.save.chunk('hb/i-A'), te.encode('log A'))
+  assert.deepEqual(await two.save.chunk('hb/i-B'), te.encode('log B'))
 })
 
 test('provenance gains one entry per restore, not per save', async () => {
