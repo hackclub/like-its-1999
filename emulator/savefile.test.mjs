@@ -338,7 +338,7 @@ test('v2 is registered on its own prefix and is the current world', () => {
   const v2 = WORLDS.get(V2_WORLD_ID)
   assert.equal(v2.disks.hda.url, `https://${CDN_HOST}/v2/hda.img`)
   assert.equal(v2.disks.hdb.url, `https://${CDN_HOST}/v2/hdb.img`)
-  assert.equal(v2.initialState.url, `https://${CDN_HOST}/v2/state.bin.zst`)
+  assert.equal(v2.initialState.url, `https://${CDN_HOST}/v2/snapshot.bin.zst`)
   assert.equal(v2.disks.hda.size, 1073741824)
   assert.equal(v2.disks.hdb.size, 4294967296)
   // restore_state is unforgiving about these: they are part of the snapshot's identity

@@ -92,7 +92,7 @@ export const WORLDS = new Map([
           chunkSize: 256 * 1024,
         },
       },
-      initialState: { url: `https://${CDN_HOST}/v2/state.bin.zst` },
+      initialState: { url: `https://${CDN_HOST}/v2/snapshot.bin.zst` },
     },
   ],
 ])
