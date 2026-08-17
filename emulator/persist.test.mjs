@@ -1,9 +1,7 @@
 // node --test emulator/persist.test.mjs
 //
-// Storage, against fake-indexeddb rather than a hand-rolled stub, so transaction
-// lifetimes and structured-clone semantics behave like a browser's. This covers the code
-// where a bug means losing someone's machine: the compare-and-swap, pruning, the
-// refuse-to-overwrite paths, and the pre-container migration.
+// runs against fake-indexeddb, so transaction lifetimes and structured-clone semantics
+// behave like a browser's
 
 import 'fake-indexeddb/auto'
 import { test, beforeEach } from 'node:test'
@@ -31,7 +29,7 @@ const devWorld = (id = 'dev:aaaa1111') => ({
   label: `local image ${id}`,
 })
 
-// A structurally real v86 state, padded so gzip has something to do.
+// structurally real v86 state, padded so gzip has something to do
 function fakeState(pad = 2048) {
   const json = te.encode(JSON.stringify({ buffer_infos: [], state: [] }))
   const total = 16 + json.length + pad
@@ -45,7 +43,7 @@ function fakeState(pad = 2048) {
   return buf
 }
 
-// Stands in for the emulator: saveSession only calls save_state().
+// saveSession only calls save_state()
 const fakeEmulator = (pad = 2048) => ({
   save_state: async () => fakeState(pad).buffer,
 })
@@ -58,12 +56,10 @@ const opts = (world, over = {}) => ({
   ...over,
 })
 
-// Reach into the database the way nothing in the app does, to assert on what landed.
 const DB = 'like-its-99'
 
-// One helper for all direct access. It tolerates a database that has no object store
-// yet, which happens whenever a test asserts on storage before anything has written —
-// otherwise transaction() throws inside a callback and the promise never settles.
+// tolerates a database with no object store yet: transaction() would otherwise throw
+// inside a callback and the promise would never settle
 function withRawStore(mode, fn) {
   return new Promise((resolve, reject) => {
     const open = indexedDB.open(DB, 2)
@@ -105,9 +101,8 @@ const rawKeys = async () =>
 const putRaw = (key, value) =>
   withRawStore('readwrite', (store) => store.put(value, key))
 
-// Each test starts from an empty database. Deleting it also exercises the real
-// versionchange path: persist.js caches one connection, and its handler is what lets
-// another tab's upgrade (or this delete) proceed instead of hanging.
+// deleting also exercises the versionchange path: persist.js caches one connection, and
+// its handler is what lets the delete proceed instead of hanging
 beforeEach(
   () =>
     new Promise((resolve) => {
@@ -169,8 +164,6 @@ test('generations advance and a stale write is refused without changing anything
 })
 
 test('claiming an empty slot fails once something is actually there', async () => {
-  // The regression: a tab that booted with nothing stored used to overwrite a machine
-  // another tab created afterwards.
   await saveSession(fakeEmulator(), opts(legacyWorld))
   await assert.rejects(
     () => saveSession(fakeEmulator(), opts(legacyWorld, { expectGen: 0 })),
@@ -188,9 +181,8 @@ test('expectGen null overwrites deliberately', async () => {
 })
 
 test('a save with no expectGen verifies the slot is empty, and refuses if it is not', async () => {
-  // opts() omits expectGen entirely. Undefined means "I never looked", which is a claim
-  // that nothing is stored — so the first save works and the second is refused, rather
-  // than a forgotten argument silently destroying someone's machine.
+  // opts() omits expectGen; undefined means "I never looked", which counts as a claim
+  // that nothing is stored
   const first = await saveSession(fakeEmulator(), opts(legacyWorld))
   assert.equal(first.gen, 1)
   await assert.rejects(
@@ -207,7 +199,7 @@ test('pruning keeps the newest slots and deletes the records, not just the index
   const keep = MAX_DEV_SLOTS
   for (let i = 0; i < keep + 2; i++) {
     await saveSession(fakeEmulator(), opts(devWorld(`dev:world${i}`)))
-    // Distinct timestamps so "newest" is well defined.
+    // distinct timestamps so "newest" is well defined
     await new Promise((r) => setTimeout(r, 2))
   }
   const index = await raw('index')
@@ -225,8 +217,6 @@ test('pruning keeps the newest slots and deletes the records, not just the index
 })
 
 test('pruning never touches a registered world, however many dev builds arrive', async () => {
-  // The dangerous version of this was recency across everything: three local rebuilds and
-  // a participant's real machine was gone to make room for a dev image.
   await saveSession(fakeEmulator(), opts(legacyWorld))
   for (let i = 0; i < MAX_DEV_SLOTS + 3; i++) {
     await saveSession(fakeEmulator(), opts(devWorld(`dev:churn${i}`)))
@@ -247,8 +237,8 @@ test('pruning never touches a registered world, however many dev builds arrive',
 })
 
 test('pruning reclaims a slot record the index never knew about', async () => {
-  // Writes are single-transaction now, so this shouldn't arise — but a record with no
-  // index entry would otherwise be invisible and unreclaimable forever.
+  // single-transaction writes should prevent this, but a record with no index entry
+  // would be invisible and unreclaimable
   await putRaw('world:dev:orphan', {
     v: 2,
     worldId: 'dev:orphan',
@@ -332,8 +322,8 @@ test('the old single-slot save migrates into the world it was captured on', asyn
 })
 
 test('a rebuilt local image must NOT adopt the old save', async () => {
-  // It records no fingerprint, so it can only be trusted for the world it was tagged
-  // with. Adopting it into every dev world meant restoring weeks-old RAM over new disks.
+  // the old save records no fingerprint, so it can only be trusted for the world it was
+  // tagged with
   await legacySlot()
   assert.equal(await loadSavedSession(devWorld()), null)
 })
@@ -371,7 +361,6 @@ test('clearing one world leaves the others alone', async () => {
 // --- carry-forward ----------------------------------------------------------------
 
 test('a save carries forward chunks and metadata it was not given again', async () => {
-  // Same guarantee as the format test, but through the storage path a real autosave takes.
   const thumb = te.encode('pretend png bytes')
   const sealed = te.encode('pretend ciphertext')
   const first = await saveSession(
@@ -387,7 +376,7 @@ test('a save carries forward chunks and metadata it was not given again', async 
     'thumb',
   ])
 
-  // An autosave: no thumbnail, no tracking data supplied.
+  // an autosave: no thumbnail, no tracking data supplied
   const second = await saveSession(
     fakeEmulator(4096),
     opts(legacyWorld, { prior: first.save, expectGen: first.gen })
@@ -410,8 +399,6 @@ test('a save carries forward chunks and metadata it was not given again', async 
 })
 
 test('each instance writes its own tracking chunk and never rewrites another', async () => {
-  // One saved machine restored twice: the forks must not clobber each other, which is what
-  // per-instance chunk ids buy.
   const one = await saveSession(
     fakeEmulator(),
     opts(legacyWorld, {
@@ -496,9 +483,6 @@ test('an import naming a disallowed disk is refused', async () => {
 })
 
 test('an import refuses to overwrite a machine saved after it was read', async () => {
-  // The window between "this replaces the machine last saved at 4pm, continue?" and the
-  // click. Consent covers the machine the user was told about, not a newer one that
-  // arrived while they were reading the dialog.
   const first = await saveSession(fakeEmulator(), opts(legacyWorld))
   const bytes = await packSaveFile({
     meta: { world: { id: legacyWorld.id } },
@@ -511,7 +495,7 @@ test('an import refuses to overwrite a machine saved after it was read', async (
     'it read the generation it would replace'
   )
 
-  // Another tab saves in between.
+  // another tab saves in between
   await saveSession(
     fakeEmulator(),
     opts(legacyWorld, { prior: first.save, expectGen: first.gen })

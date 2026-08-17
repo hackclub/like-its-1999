@@ -1,8 +1,7 @@
 // node --test emulator/daemon/conversation.test.mjs
 //
-// The host and a fake guest talking to each other over encoded bytes. The unit tests check
-// each side's decisions in isolation; these check that the two halves actually agree, and
-// that the failure modes PROTOCOL.md promises to survive really do resolve.
+// the host and a fake guest talking over encoded bytes: the unit tests check each side's
+// decisions alone, these check that the two halves agree
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -54,7 +53,7 @@ test('a call round trips through real bytes', () => {
 })
 
 test('a title full of protocol-hostile characters survives the wire', () => {
-  // The reason payloads are length-prefixed rather than delimited text.
+  // why payloads are length-prefixed rather than delimited text
   const nasty = 'C:\\Docs\\a\tb\nc"99"\\ - EditPlus'
   const { link } = setup({
     role: 'child',
@@ -83,7 +82,7 @@ test('an unsolicited window change arrives as an event', () => {
 })
 
 test('a machine with no agent stays quiet and healthy', () => {
-  // Every v1 world looks like this, forever, and it must never read as an error.
+  // every v1 world looks like this, forever, and it must never read as an error
   const { agent, link } = setup({ quirks: { silent: true } })
   link.tick(0)
   link.tick(ABSENT_AFTER_MS)
@@ -117,8 +116,8 @@ test('a reload does not disturb a child already running the wanted build', () =>
 })
 
 test('a stale reply replayed after a restore is ignored', () => {
-  // A snapshot taken mid-call comes back and the child answers a question this page never
-  // asked. It must not be matched to a live call with the same id.
+  // a snapshot taken mid-call comes back and the child answers a question this page
+  // never asked
   const { link } = setup({
     role: 'child',
     hash: HASH,
@@ -187,8 +186,8 @@ test('a child that dies is reported and replaced without waiting for a tick', ()
   assert.equal(agent.state, 'ready')
   assert.equal(link.guest.state.received.length, 0, 'nothing pushed yet')
 
-  // The parent reports the death and re-identifies, which invites the push, which brings
-  // the child back — the whole recovery happens in one exchange.
+  // the parent reports the death and re-identifies, which invites the push that brings
+  // the child back, all in one exchange
   link.guest.childDown()
   assert.ok(
     link.events.some((e) => e.type === 'status' && e.code === 'child-down')
@@ -244,7 +243,7 @@ test('a PING from the guest is answered with its own token', () => {
   link.guest.send(TYPES.PING, '77')
   const pong = link.guest.state.sent.filter((f) => f.type === TYPES.PING)
   assert.equal(pong.length, 1, 'the guest pinged')
-  // The host's PONG went back through the same wire; the guest ignores it without error.
+  // the host's PONG goes back through the same wire; the guest ignores it without error
   assert.equal(link.guest.state.resets, 1)
 })
 

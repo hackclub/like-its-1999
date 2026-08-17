@@ -1,8 +1,7 @@
 // node --test emulator/daemon/tracking.test.mjs
 //
-// The log must record enough to compute hours later under a policy we have not chosen yet,
-// and must not quietly lose a span. It deliberately computes no hours, so these tests are
-// about fidelity and volume rather than totals.
+// the log records spans and computes no hours, since the policy is chosen later, so these
+// tests are about fidelity and volume rather than totals
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -25,7 +24,7 @@ import {
 const S = 1000
 const M = 60 * S
 const log = () => createLog({ instanceId: 'i1' })
-// seal takes no time: a span always ends at the last input, never at the flush moment.
+// seal takes no time: a span always ends at the last input, never at the flush moment
 const sealAt = (l) => seal(l)
 const kinds = (l) => l.lines.map((x) => x.ev)
 const actives = (l) => l.lines.filter((x) => x.ev === 'active')
@@ -44,7 +43,7 @@ test('a window change is recorded once, and repeats are not', () => {
 test('typing for a while produces a keepalive rhythm, not a line per keystroke', () => {
   const l = log()
   onWindow(l, { exe: 'EDITPLUS.EXE', win: 'a' }, 0)
-  // Ten minutes of steady typing, one input event per second.
+  // ten minutes of steady typing, one input event per second
   for (let t = 0; t <= 10 * M; t += S) onInput(l, { keys: 3 }, t)
   const written = actives(l)
   assert.equal(written.length, 5, 'one per 2-minute keepalive, not 600')
@@ -62,7 +61,7 @@ test('a span closes when input stops, and reopens when it resumes', () => {
   onInput(l, { keys: 10 }, 0)
   onInput(l, { keys: 10 }, 30 * S)
 
-  // Nothing for longer than the idle gap.
+  // nothing for longer than the idle gap
   assert.equal(onTick(l, 30 * S + IDLE_GAP_MS - 1), null)
   const closed = onTick(l, 30 * S + IDLE_GAP_MS)
   assert.equal(closed.why, 'idle')
@@ -74,7 +73,6 @@ test('a span closes when input stops, and reopens when it resumes', () => {
   assert.equal(closed.from, 0)
   assert.equal(closed.keys, 20)
 
-  // And a later keystroke starts a fresh span rather than extending the old one.
   onInput(l, { keys: 1 }, 60 * M)
   sealAt(l)
   const spans = actives(l)
@@ -190,13 +188,13 @@ test('summarise reports what was recorded, and calls it nothing more', () => {
   sealAt(l)
 
   const s = summarise(l)
-  // 0-60s in EditPlus, then a lone keystroke at 90s: a zero-length span, because nothing
-  // credits the silence after someone stops typing. A tally may add a per-span minimum.
+  // 0-60s in EditPlus, then a lone keystroke at 90s is a zero-length span: nothing
+  // credits the silence after someone stops typing
   assert.equal(s.activeMs, 60 * S)
   assert.equal(s.byExe['PSP.EXE'], 0)
   assert.equal(s.keys, 210, 'every keystroke is still counted')
   assert.deepEqual(Object.keys(s.byExe), ['EDITPLUS.EXE', 'PSP.EXE'])
-  // No hours, no policy, no cap applied: that is the tally's job, later.
+  // hours, policy and caps are the tally's job, later
   assert.equal(s.hours, undefined)
 })
 
@@ -209,7 +207,7 @@ test('a full day of steady work stays a small log', () => {
     onInput(l, { keys: 5 }, t)
   }
   sealAt(l)
-  // Fixed-rate sampling would be ~17k lines a day; spans are two orders of magnitude less.
+  // fixed-rate sampling would be ~17k lines a day; spans are two orders of magnitude less
   assert.ok(l.lines.length < 300, `${l.lines.length} lines`)
   assert.equal(summarise(l).keys, 5 * (8 * 60 * 6))
 })

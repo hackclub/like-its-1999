@@ -1,29 +1,23 @@
-// Bake a v86 state's disk overlays into base image files — "flatten" — so guest
-// writes captured only in a save_state live on disk instead of in a fragile RAM
-// overlay. Fully automated: it clones each base, paints the matching overlay's blocks
-// in, and verifies the result mounts as FAT.
+// bake a v86 state's disk overlays into base image files, so guest writes that exist
+// only in a save_state live on disk. clones each base, paints the matching overlay's
+// blocks in, and checks the result still mounts as FAT
 //
-// This is the JS replacement for scripts/flatten.py + parse_state.py: same state
-// parser as the extractor (state.js), so there's one source of truth for the format.
-//
-// Overlay→disk assignment: v86 serialises overlays in the order disks are registered
-// (hda then hdb), so overlay[i] maps to base[i] by default. Each result is then
-// mounted and probed; a base that won't mount after flattening is reported as an
-// error (likely a wrong pairing) unless --force is given.
+// v86 serialises overlays in the order the disks are registered (hda then hdb), so
+// overlay[i] pairs with base[i] by default; a base that fails the mount check after
+// flattening usually means the wrong pairing
 
 import { parseState, maybeGunzip } from './state.js'
 import { nodeFileSource } from './blockdev.js'
 import { OverlayBlockDevice } from './blockdev.js'
 import { FatFs } from './fat.js'
 
-// Apply an overlay's blocks onto an already-cloned output image file (Node).
-// Returns the number of blocks written.
+// paints an overlay's blocks onto an already-cloned output image (node)
 export async function applyOverlayToFile(outPath, overlay) {
   const fs = await import('node:fs/promises')
   const handle = await fs.open(outPath, 'r+')
   try {
     const bs = overlay.blockSize
-    // Sort by index so writes are sequential (kinder to the disk).
+    // sort by index so the writes go out sequentially
     const idxs = [...overlay.blocks.keys()].sort((a, b) => a - b)
     for (const idx of idxs) {
       const bytes = overlay.block(idx)
@@ -35,7 +29,6 @@ export async function applyOverlayToFile(outPath, overlay) {
   }
 }
 
-// Does `outPath` mount as a FAT filesystem with a parseable root directory?
 async function mountsOk(outPath) {
   try {
     const base = await nodeFileSource(outPath)
@@ -51,7 +44,6 @@ async function mountsOk(outPath) {
   }
 }
 
-// Flatten one base→out with a chosen overlay. Clones base to out first.
 export async function flattenOne(
   basePath,
   outPath,
@@ -70,16 +62,8 @@ export async function flattenOne(
   }
 }
 
-// ---------------------------------------------------------------------------------
-// Node CLI:  node flatten.js <state> <base> <out> [<base2> <out2> ...]
-//
-//   node flatten.js state.bin hda.img hda-flat.img            # 1 disk
-//   node flatten.js state.bin hda.img hda-flat.img hdb.img hdb-flat.img
-//
-// Pairs bases with overlays in order (overlay[0]→first base, ...). Override the
-// overlay used for a given base with VMFS_OVERLAY_MAP="0,1" (comma-separated indices,
-// one per base). Pass --force to write even if a result fails the FAT mount check.
-// ---------------------------------------------------------------------------------
+// node CLI: node flatten.js <state> <base> <out> [<base2> <out2> ...]
+// VMFS_OVERLAY_MAP="0,1" overrides the overlay used per base, in base order
 
 const isMain =
   typeof process !== 'undefined' &&

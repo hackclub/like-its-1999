@@ -1,18 +1,12 @@
 // node --test emulator/daemon/golden.test.mjs
 //
-// The wire format has two implementations — frame.js here and c/frame.c in the guest — and
-// nothing stops them drifting apart except this file. Three properties:
+// the wire format has two implementations, frame.js here and c/frame.c in the guest, and
+// only this file stops them drifting: the committed fixture pins the JS encoder, and the C
+// must decode and re-encode it to byte-identical output, which catches disagreements a
+// field comparison would miss (header layout, CRC, integer width)
 //
-//   1. The committed fixture still matches what frame.js produces today, so an accidental
-//      change to the JS encoder shows up as a failing test rather than as guests that can
-//      no longer be understood.
-//   2. The C decodes every fixture frame and, re-encoding from what it decoded, produces
-//      bytes this decoder reads back as the same frames.
-//   3. Those bytes are identical to the originals, which catches disagreements the field
-//      comparison would miss (header layout, CRC, integer width).
-//
-// The C half needs clang. Where it is missing the test says so and skips rather than
-// pretending: `scripts/build-daemon.sh test` is the thing that guarantees it ran.
+// the C half needs clang, and skips when the binary is missing, so
+// `scripts/build-daemon.sh test` is what guarantees it ran
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -82,7 +76,7 @@ test('the C implementation agrees byte for byte', (t) => {
   const original = encodeAll()
   writeFileSync(inPath, original)
 
-  // The C decodes each frame and re-encodes it from the decoded fields.
+  // the C decodes each frame and re-encodes it from the decoded fields
   execFileSync(golden, [inPath, outPath], { stdio: 'pipe' })
 
   const returned = new Uint8Array(readFileSync(outPath))
@@ -101,7 +95,6 @@ test('the C implementation agrees byte for byte', (t) => {
     )
   })
 
-  // The strongest form: not merely equivalent, identical.
   assert.deepEqual(
     returned,
     original,

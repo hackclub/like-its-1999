@@ -1,6 +1,5 @@
 import { V86 } from 'v86'
 
-// Vite resolves these to served URLs (dev) or hashed asset URLs (build).
 import wasmUrl from 'v86/build/v86.wasm?url'
 import seabiosUrl from './vendor/bios/seabios.bin?url'
 import vgabiosUrl from './vendor/bios/vgabios.bin?url'
@@ -44,35 +43,27 @@ import { createFileBrowser, openLiveFs } from './vmfs/filebrowser.js'
 import { createCdromControl } from './cdrom-ui.js'
 import { installAtapiCdromFix } from './cdrom-atapi-fix.js'
 
-// Our custom Windows 98 image (built in tmp-image-build/, checkpoint 03):
-//   - C: (hda) — Win98 SE + absolute mouse (vbmouse) + True Color (VBEMP) + the
-//     web-dev toolkit's registry/DLLs + configured desktop & home pages.
-//   - D: (hdb) — the toolkit: EditPlus, Netscape (Communicator+Composer), Paint
-//     Shop Pro 6, GIF Construction Set, WS_FTP LE, Flash 4.
-//   - state.bin.zst — instant-boot RAM snapshot of the settled desktop.
-// The disks are async: reads stream in 256 KiB chunks and guest writes go to an
-// in-memory overlay that is never written back — so D: is effectively read-only and
-// only C: writes matter for a submission.
+// custom win98 image (built in tmp-image-build/, checkpoint 03): C: (hda) is win98 se
+// with the web-dev toolkit installed, D: (hdb) holds the toolkit itself, state.bin.zst
+// is a boot snapshot of the settled desktop
+// disks are async and guest writes go to an in-memory overlay that is never written
+// back, so D: is effectively read-only and only C: writes matter for a submission
 //
-// Which image, and the machine config that goes with it, is a *world* (worlds.js) —
-// not module constants — because a v86 state only restores against the disks it was
-// captured on. Boot order: a shared machine, else an explicitly requested world, else
-// this build's current world (locally, a fingerprint of the images on disk).
+// a v86 state only restores against the disks it was captured on, so an image plus its
+// machine config is a world (worlds.js). boot order: shared machine, else a requested
+// world, else this build's current world
 const params = readModeParams()
 const status = document.getElementById('status')
 const setStatus = (text) => {
   if (status) status.textContent = text
 }
 
-// Identifies this restore, not this file: one saved machine can be restored many
-// times, and the tracking data has to be able to tell those apart later.
+// per restore, not per save: one saved machine can be restored many times and the
+// tracking data has to tell those apart later
 const instanceId = crypto.randomUUID()
 
-// A ?share=<url> parameter turns this tab into a viewer of someone else's exported
-// machine: we fetch it and boot it instead of the user's own session, autosave is
-// disabled, and a manual save warns before it clobbers whatever the user had saved.
-// Legacy v1 shares (a bare gzipped state, which is every link published so far) carry
-// no world, so they resolve to the legacy world and keep booting against v1 disks.
+// legacy v1 shares (a bare gzipped state, which is every link published so far) carry
+// no world, so they resolve to the legacy world and keep booting against v1 disks
 let shared = null
 if (params.share) {
   try {
@@ -87,16 +78,13 @@ if (params.share) {
 }
 const isShared = !!shared
 
-// The world to build the machine from. currentWorld() handles ?world= too, including
-// re-measuring a local image before honouring a dev world id.
 let world = shared?.world ?? null
 let worldNote = ''
 if (!world) {
   try {
     world = await currentWorld(params)
   } catch (e) {
-    // Fall back rather than stopping, and say so in the toolbar. A modal here would
-    // block the page before the emulator even exists.
+    // fall back rather than stop: a modal here blocks the page before the emulator exists
     console.error('requested world unavailable:', e)
     worldNote = e.message
     params.world = null
@@ -104,12 +92,8 @@ if (!world) {
   }
 }
 
-// Gather the facts, then let session.js decide. Every combination of shared / fresh /
-// nosave / unreadable / generation is table-tested there rather than reasoned about here.
 const saved = isShared || params.fresh ? null : await loadSavedSession(world)
-// Two facts about *other* slots, both read from the small index rather than the records.
-// `otherDevSaves` distinguishes a rebuilt local image from a first visit; `storedElsewhere`
-// is whether a fresh boot has something it would destroy by saving.
+// the index, not the records: this only needs to know which other slots exist
 const slots =
   !saved && !isShared && (params.fresh || isDevWorldId(world.id))
     ? await listSavedWorlds()
@@ -141,16 +125,15 @@ if (plan.source === 'cold' && world.snapshotIsStale)
       'Recapture the snapshot after flattening, or keep cold booting.'
   )
 
-// v86 wraps this buffer and reads `.buffer` off it, so hand it an ArrayBuffer that
-// covers exactly the state (a subarray view would point at the wrong bytes).
+// v86 reads `.buffer` off what it is handed, so a subarray view would give it the
+// wrong bytes
 const asArrayBuffer = (u8) =>
   u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength
     ? u8.buffer
     : u8.slice().buffer
 
-// Instant boot from whatever the plan chose. v86's built-in zstd handles the shipped
-// .zst; a cold boot passes nothing and comes up from the BIOS, which is the local loop
-// for booting an image you just rebuilt.
+// v86 decompresses the shipped .zst itself; a cold boot passes nothing and comes up
+// from the bios
 const initialState = bootState
   ? { buffer: asArrayBuffer(bootState) }
   : plan.source === 'snapshot'
@@ -164,17 +147,15 @@ const emulator = new V86({
 
   screen_container: document.getElementById('screen_container'),
 
-  // memory/vga sizes, the disks and COM2 all come from the world — they must match
-  // what the state was captured with or restore_state fails.
+  // memory/vga sizes, the disks and COM2 come from the world; they must match what the
+  // state was captured with or restore_state fails
   ...worldToV86Config(world, { initialState }),
 
   autostart: true,
 })
 
-// Minimal status wiring so it's obvious the thing is alive while it loads.
-// Once the guest is running we clear it (keeping any note about how we booted) —
-// download-progress keeps firing for lazy disk reads during normal use, so we only
-// show it pre-start.
+// download-progress keeps firing for lazy disk reads during normal use, so only show
+// it before the guest starts
 let running = false
 emulator.add_listener(
   'emulator-loaded',
@@ -191,16 +172,10 @@ emulator.add_listener('download-progress', (e) => {
   )
 })
 
-// --- tracking -------------------------------------------------------------------
-// Talk to the in-guest agent over COM1 and record what the machine was doing. Every world
-// shipped so far has no agent at all, so `absent` is the normal, healthy outcome here and
-// must stay quiet: the log still records input and the page still works.
-//
-// An image with the daemon installed answers, and usually already has the child we want
-// cached, in which case nothing is transferred at all. A push only happens when the build
-// has changed.
-// Fetched rather than imported: the hash is derived from the bytes, and a build with no
-// agent binary is a normal state that must not stop the page.
+// talks to the in-guest agent over COM1. every world shipped so far has no agent, so an
+// absent one is normal and must stay quiet: the log still records input either way
+// fetched rather than imported so the hash comes from the bytes, and so a build with no
+// agent binary does not stop the page
 const daemonBuild = await loadDaemon()
 const link = createLink({
   emulator,
@@ -213,10 +188,9 @@ const link = createLink({
   },
 })
 
-// Seal this instance's log for the container. Encryption keeps window titles (file names,
-// paths) out of an artifact participants publish; the signature anchors when the bytes
-// existed. Both are best-effort: a save must never fail because a key is missing or the
-// signing endpoint is down, so either one falling through just means a less provable log.
+// encryption keeps window titles (file names, paths) out of an artifact participants
+// publish; the signature anchors when the bytes existed. both are best-effort: a save
+// must never fail because a key is missing or the signing endpoint is down
 async function sealTracking() {
   if (!hasRecipientKey()) return null
   const lines = toNdjson(link.seal())
@@ -241,8 +215,7 @@ const gzipBytes = async (bytes) =>
     ).arrayBuffer()
   )
 
-// Ask the server to countersign the ciphertext hash. Offline, or no endpoint deployed, is
-// an ordinary outcome rather than an error.
+// offline, or no endpoint deployed, is an ordinary outcome rather than an error
 async function countersign(body) {
   try {
     const resp = await fetch('/api/sign', {
@@ -258,31 +231,62 @@ async function countersign(body) {
   }
 }
 
-// Integer scaling: Win98 is pixel art, so we draw it at the largest whole number
-// of DEVICE pixels per guest pixel that fits — crisp, no mushy fractional scaling.
+// win98 is pixel art, so draw it at the largest whole number of device pixels per guest
+// pixel that fits
 //
-// screen_set_scale(s) does NOT map s directly to pixels: v86 folds in an internal
-// per-video-mode factor (1 in SVGA/True Color, 2 in plain VGA) that is NOT the
-// devicePixelRatio. So: devicePxPerGuestPx = s * modeFactor * dpr. We measure
-// modeFactor (rather than assume it) whenever the mode changes, then invert.
+// screen_set_scale(s) does not map s directly to pixels: v86 folds in a per-video-mode
+// factor (1 in svga/true color, 2 in plain vga) that is not the devicePixelRatio, so
+// devicePxPerGuestPx = s * modeFactor * dpr. measure modeFactor per mode, then invert
 const holder = document.getElementById('screen_holder')
 const canvas = document.querySelector('#screen_container canvas')
+const textDiv = document.querySelector('#screen_container div')
 let guestW = 0
 let guestH = 0
-let modeFactor = 1 // CSS px per guest px at scale 1; re-measured per video mode
+let modeFactor = 1 // css px per guest px at scale 1
 
+// never trust a measurement of 0: v86 sizes an element as (measured rect * scale), so
+// measuring a hidden one writes width:0 and the screen goes black with the guest still
+// drawing into it (what happened on exit from a dos text-mode program)
 function measureModeFactor() {
   if (!guestW) return
   emulator.screen_set_scale(1, 1)
-  modeFactor = canvas.getBoundingClientRect().width / guestW || 1
+  const w = canvas.getBoundingClientRect().width
+  if (w > 0) modeFactor = w / guestW
 }
 
+// text mode cannot share the graphical path:
+//   - `screen-set-size` reports character cells (80x25), not pixels, so the integer
+//     device-multiple maths below would divide the viewport by 80 and overshoot ~9x
+//   - v86 scales the text <div> twice: elem_set_scale writes an explicit width/height of
+//     (measured rect * scale) and a css transform of the same scale, so the glyphs grow
+//     by s while the layout box grows by s^2 and the flex holder centres the empty space
+//
+// so: fit the glyphs to the holder, anchor the transform top-left (see index.html), then
+// put the box back to the glyph extent so centring works on what is visible
+function rescaleText() {
+  emulator.screen_set_scale(1, 1)
+  const nat = textDiv.getBoundingClientRect()
+  if (!nat.width || !nat.height) return
+  const s = Math.min(
+    holder.clientWidth / nat.width,
+    holder.clientHeight / nat.height
+  )
+  emulator.screen_set_scale(s, s)
+  textDiv.style.width = nat.width * s + 'px'
+  textDiv.style.height = nat.height * s + 'px'
+}
+
+// ask the dom rather than trust the last screen-set-size: returning from a full-screen
+// dos box does not reliably fire the event, and a stale text-mode flag makes every later
+// rescale measure the hidden div, get 0 and give up, leaving the screen at 1:1
+const inTextMode = () => getComputedStyle(canvas).display === 'none'
+
 function rescale() {
+  if (inTextMode()) return rescaleText()
   if (!guestW || !guestH) return
   const dpr = window.devicePixelRatio || 1
-  // Always measure the holder: whether the parent fullscreens the iframe or (standalone)
-  // the holder goes fullscreen itself, the viewport grows to the screen, so the holder
-  // already reflects the available space in *device* pixels.
+  // the holder reflects the available space under both fullscreen paths (parent
+  // fullscreens the iframe, or standalone the holder fullscreens itself)
   const availW = holder.clientWidth * dpr
   const availH = holder.clientHeight * dpr
   const deviceMultiple = Math.max(
@@ -293,22 +297,33 @@ function rescale() {
   emulator.screen_set_scale(scale, scale)
 }
 
-emulator.add_listener('screen-set-size', ([w, h]) => {
-  guestW = w
-  guestH = h
-  measureModeFactor()
-  rescale()
+emulator.add_listener('screen-set-size', ([w, h, bpp]) => {
+  // bpp is the only thing separating the two callers in v86's vga.js: text mode sends
+  // [cols, rows, 0], graphical sends [width, height, bpp] and only those are guest pixels
+  if (bpp !== 0) {
+    guestW = w
+    guestH = h
+  }
+  // v86 swaps which element is visible around this event, so measuring now reads the
+  // outgoing one. the swap back from a full-screen dos box can take longer than a frame,
+  // hence the second, later measurement
+  requestAnimationFrame(() => {
+    if (!inTextMode()) measureModeFactor()
+    rescale()
+  })
+  setTimeout(() => {
+    if (!inTextMode()) measureModeFactor()
+    rescale()
+  }, 250)
 })
 window.addEventListener('resize', rescale)
 document.addEventListener('fullscreenchange', rescale)
 
-// Fullscreen the emulator. Prefer the parent shell — it's the top-level document, so
-// only it can keyboard.lock() (which lets Esc/Tab/etc reach Win98). We call it
-// synchronously from this click so the user-activation (which propagates to the
-// parent) is still valid for requestFullscreen. Standalone (no parent), fullscreen the
-// holder ourselves. Either way NO pointer lock: the absolute-mouse driver tracks the
-// host 1:1, whereas a pointer lock switches the guest to relative mouse (inverted Y,
-// unnatural sensitivity).
+// prefer the parent shell: only the top-level document can keyboard.lock(), which is
+// what lets Esc/Tab reach win98. called synchronously from the click so the user
+// activation (which propagates to the parent) is still valid for requestFullscreen
+// no pointer lock either way: it switches the guest to relative mouse (inverted Y,
+// unnatural sensitivity) instead of the absolute driver that tracks the host 1:1
 document.getElementById('fullscreen').addEventListener('click', () => {
   let parentFn = null
   try {
@@ -319,34 +334,96 @@ document.getElementById('fullscreen').addEventListener('click', () => {
   else holder.requestFullscreen?.().catch(() => {})
 })
 
-// The parent owns the fullscreen (it's on the iframe element), so we can't see it via
-// document.fullscreenElement here — it messages us instead. Hide the toolbar + rescale.
+// the parent owns the fullscreen (it is on the iframe element), so it is invisible to
+// document.fullscreenElement here and the parent messages us instead
 window.addEventListener('message', (e) => {
   if (e.origin !== location.origin || e.data?.type !== 'fullscreen') return
   document.body.classList.toggle('fs', e.data.on)
   rescale()
 })
 
-// --- State persistence --------------------------------------------------------
-// Save the running session to IndexedDB as a `.99sv` container (savefile.js) keyed by
-// its world, restore it on next load (see initial_state above), and export/import it
-// as a file — the same artifact a ?share= URL points at.
+// Win98 powers the monitor down after a while, and v86 answers by collapsing the screen
+// elements to nothing. That kills the mouse outright: v86 gates every mouse event on
+// is_child(e.target, screen_container) (mouse.js may_handle), and a zero-sized container can
+// never contain the target, so no click is ever delivered. Keys still get through — the
+// keyboard adapter binds to window with no such gate — but the machine looks dead, and a
+// participant has neither that knowledge nor a console to rescue themselves with.
+//
+// So take the click ourselves and send a harmless left shift (make + break), which wakes the
+// display without typing anything into whatever has focus in the guest.
+holder.addEventListener('pointerdown', () => {
+  const collapsed =
+    !canvas.getBoundingClientRect().width &&
+    !textDiv.getBoundingClientRect().width
+  if (collapsed) emulator.keyboard_send_scancodes([0x2a, 0xaa])
+})
+
+// A trackpad flick freezes Win98, and it takes two v86 bugs to do it.
+//
+// mouse.js:317 collapses every wheel event to a single ±1 notch and calls
+// send_mouse_packet, so a 0.01-pixel inertial tick costs a full 4-byte PS/2 packet and an
+// IRQ12 — exactly as much as a real wheel click. A macOS trackpad emits those at 60-120Hz
+// and momentum keeps them coming after the fingers lift, which is several hundred
+// interrupts from one gesture. Then ps2.js's 1024-byte mouse_buffer overflows, and
+// ByteQueue.push (lib.js:257) overwrites the oldest byte *without advancing start*. Packets
+// are 4 bytes, so the ring desyncs and the guest starts reading byte 3 of one packet as
+// byte 1 of the next: that is why the pointer stays wrong afterwards rather than just
+// catching up.
+//
+// Coalescing here rather than patching v86 keeps the fix in our own code. One notch per
+// FLUSH_MS is ~17/second, far above what a 1999 wheel could physically produce and far
+// below what drowns the guest. The threshold is in normalised pixels so a real wheel (100+
+// per click) still moves immediately while inertial dribble accumulates.
+const WHEEL_FLUSH_MS = 60
+const WHEEL_NOTCH_PX = 40
+let wheelAcc = 0
+let wheelLastFlush = 0
+
+// deltaMode 1 is lines and 2 is pages; both are rare, but a page-mode event is worth ~100x
+// a pixel one and would otherwise read as no scroll at all
+const wheelPixels = (e) =>
+  e.deltaMode === 1
+    ? e.deltaY * 16
+    : e.deltaMode === 2
+      ? e.deltaY * 400
+      : e.deltaY
+
+// capture on window runs before v86's own bubble-phase listener on the same target, so
+// stopImmediatePropagation keeps the raw event away from it entirely. Only events over the
+// screen are taken: v86 ignores the rest anyway (may_handle), and swallowing them would
+// break scrolling on the page around it.
+window.addEventListener(
+  'wheel',
+  (e) => {
+    if (!canvas.parentNode.contains(e.target)) return
+    e.preventDefault()
+    e.stopImmediatePropagation()
+
+    wheelAcc += wheelPixels(e)
+    const now = performance.now()
+    if (now - wheelLastFlush < WHEEL_FLUSH_MS) return
+    if (Math.abs(wheelAcc) < WHEEL_NOTCH_PX) return
+
+    // v86 reads e.wheelDelta, which is positive scrolling up, whereas deltaY is positive
+    // scrolling down
+    const notch = wheelAcc > 0 ? -1 : 1
+    wheelAcc -= notch * -WHEEL_NOTCH_PX
+    wheelLastFlush = now
+    emulator.bus?.send('mouse-wheel', [notch, 0])
+  },
+  { capture: true, passive: false }
+)
+
+// sessions are stored in IndexedDB as a `.99sv` container (savefile.js) keyed by world;
+// an export is the same container as a file, which is what a ?share= url points at
 const $ = (id) => document.getElementById(id)
 const clock = () =>
   new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
-// Everything the container needs besides the RAM image: the world, the thumbnail, and this
-// instance's tracking log.
-//
-// The thumbnail is captured only for deliberate saves. An autosave skips it: the
-// pagehide/beforeunload path is a race against the tab closing, and rendering plus
-// PNG-encoding a frame there is exactly the wrong place to spend time (the canvas is
-// often already gone by then anyway). Skipping it is free — packSession carries the
-// previous container's thumbnail through untouched when we don't supply a new one.
-//
-// The tracking log is sealed on every save, including autosaves, because unlike the
-// thumbnail it has changed since the last one and the previous chunk is this instance's
-// own: rewriting it loses the newest spans rather than preserving anything.
+// an autosave skips the thumbnail: it runs on the pagehide path where the canvas is
+// often already gone, and packSession carries the previous container's thumbnail through
+// when none is supplied. the tracking log is sealed on every save because the previous
+// chunk is this instance's own, so keeping it would drop the newest spans
 const saveOptions = async ({ withThumb = true, expectGen } = {}) => ({
   world,
   prior: session.prior,
@@ -358,9 +435,7 @@ const saveOptions = async ({ withThumb = true, expectGen } = {}) => ({
 
 let saving = false
 async function doSave(label = 'saved', { auto = false, force = false } = {}) {
-  // Whether this save may happen at all is session.js's call: ?nosave, a shared machine
-  // on the autosave path, an unreadable save we must not clobber, or one already in
-  // flight. An autosave that declines says nothing, since nobody asked for it.
+  // an autosave that declines says nothing, since nobody asked for it
   const verdict = planSave({ params, session, isShared, auto, force, saving })
   if (!verdict.allowed) return verdict.reason && setStatus(verdict.reason)
   saving = true
@@ -373,14 +448,13 @@ async function doSave(label = 'saved', { auto = false, force = false } = {}) {
     setStatus(`${label} ${clock()} · ${(size / 1e6).toFixed(1)} MB`)
   } catch (e) {
     if (e instanceof StorageFullError) {
-      // The one save failure a user can act on, so it says what to do.
       console.warn(e.message)
       setStatus('out of browser storage — export to a file')
       alert(e.message)
       return
     }
     if (e instanceof StaleSaveError) {
-      // Another tab owns this machine now. Silently winning would discard its work.
+      // another tab owns this machine now; winning silently would discard its work
       console.warn(e.message)
       setStatus('another tab saved this machine — reload to continue here')
       return
@@ -392,8 +466,6 @@ async function doSave(label = 'saved', { auto = false, force = false } = {}) {
   }
 }
 
-// A shared machine indicates itself in the toolbar and never autosaves. A manual save
-// is still allowed, but it overwrites the user's own saved session — so we warn first.
 if (isShared) $('shared-badge')?.removeAttribute('hidden')
 
 $('save')?.addEventListener('click', () => {
@@ -405,8 +477,8 @@ $('save')?.addEventListener('click', () => {
     )
   )
     return
-  // A save we couldn't parse is still someone's machine, so replacing it is a decision
-  // the user has to make explicitly rather than something an autosave does quietly.
+  // a save we couldn't parse is still someone's machine, so replacing it has to be an
+  // explicit decision rather than something an autosave does quietly
   if (
     session.blocked &&
     !confirm(
@@ -415,8 +487,7 @@ $('save')?.addEventListener('click', () => {
     )
   )
     return
-  // Replacing an unreadable save is deliberate, so it skips the compare-and-swap. (A
-  // shared machine already boots with no generation claim, so it needs no special case.)
+  // replacing an unreadable save is deliberate, so it skips the compare-and-swap
   doSave('saved', { force: !!session.blocked })
 })
 $('export')?.addEventListener('click', async () => {
@@ -429,11 +500,9 @@ $('export')?.addEventListener('click', async () => {
   }
 })
 
-// Render the guest framebuffer to a PNG. screen_make_screenshot() returns an <img>
-// already at native guest resolution (graphics) or char-cell resolution (text mode).
-// Nearest-neighbour only, both ways: Win98 is pixel art and any smoothing turns it to
-// mush. `scale` blows every guest pixel up to an N×N block for the download; `maxWidth`
-// shrinks it for the thumbnail embedded in a save.
+// screen_make_screenshot() returns an <img> at native guest resolution (graphics) or
+// char-cell resolution (text mode). nearest-neighbour both ways: win98 is pixel art and
+// smoothing turns it to mush
 async function captureScreen({ scale = 1, maxWidth = 0 } = {}) {
   if (!running) return null
   const img = emulator.screen_make_screenshot()
@@ -455,8 +524,8 @@ async function captureScreen({ scale = 1, maxWidth = 0 } = {}) {
     const blob = await new Promise((res) => c.toBlob(res, 'image/png'))
     return new Uint8Array(await blob.arrayBuffer())
   } catch (e) {
-    // A frame isn't always capturable — mid-navigation the canvas is already gone and
-    // decode() throws. Never let that break a save; a thumbnail is decoration.
+    // mid-navigation the canvas is already gone and decode() throws; a thumbnail is
+    // decoration and must never break a save
     console.debug('screen capture unavailable:', e.message)
     return null
   }
@@ -482,8 +551,8 @@ $('import')?.addEventListener('change', async (e) => {
   if (!file) return
   setStatus('importing…')
   try {
-    // Read first, then ask. The file names its own world, which may not be the one
-    // running, so only now can we say accurately what would be replaced.
+    // read first, then ask: the file names its own world, which may not be the one
+    // running, so only now can we say what would be replaced
     const imported = await readImport(file, world)
     const verdict = planImport({ imported, params })
     if (verdict.refuse) throw new Error(verdict.refuse)
@@ -502,8 +571,8 @@ $('import')?.addEventListener('change', async (e) => {
       return
     }
 
-    // A state only restores into the machine it was captured on, so a file from another
-    // world can't be applied live: store it and reload into that world.
+    // a state only restores into the machine it was captured on, so a file from another
+    // world cannot be applied live: store it and reload into that world
     if (verdict.needsReload) {
       await storeImport(imported)
       setStatus(`imported a ${imported.world.label} machine — reloading…`)
@@ -534,10 +603,8 @@ $('import')?.addEventListener('change', async (e) => {
   }
   e.target.value = ''
 })
-// File browser: read the disks straight from the live VM's buffers (merges the
-// guest's writes and reuses v86's chunk cache — no save_state, no re-download) and let
-// the user download files / folders. Built lazily on first click, then reused; each
-// disk's FAT is only read when that disk is first opened.
+// reads the disks from the live vm's buffers, which merges the guest's writes and
+// reuses v86's chunk cache, so no save_state and no re-download
 let browser = null
 $('browse')?.addEventListener('click', async () => {
   try {
@@ -555,22 +622,16 @@ $('browse')?.addEventListener('click', async () => {
   }
 })
 
-// --- CD-ROM: user image import + preset discs ---------------------------------
-// v86 always builds a secondary-master ATAPI CD-ROM device (see cpu.js), even when
-// no `cdrom` is passed at boot — so emulator.set_cdrom()/eject_cdrom() just work,
-// no change to the V86 config above needed. Win98 sees it as drive E:, and only one
-// disc can be "in the drive" at a time, same as the real hardware this emulates. The
-// toolbar button + upload/preset/dev-iso modal live in cdrom-ui.js.
+// v86 always builds a secondary-master atapi cd-rom device (see cpu.js) even when no
+// `cdrom` is passed at boot, so set_cdrom()/eject_cdrom() work with no change to the
+// V86 config above. win98 sees it as drive E:
 //
-// Preset discs are static, hosted, read-only images (built like hda.img). Mount them
-// by URL (`{ url, size, async: true }`) rather than `{ buffer }` — that makes v86
-// treat it like hda/hdb (an AsyncXHRBuffer whose save_state only serializes its
-// sparse overlay), so a preset never gets embedded whole into every autosave.
-// URL mounts only work with the ATAPI patches below — see cdrom-atapi-fix.js.
+// mount presets by url (`{ url, size, async: true }`) rather than `{ buffer }`: that
+// gives an AsyncXHRBuffer whose save_state only serializes the sparse overlay, so a
+// preset is never embedded whole into every autosave. url mounts need cdrom-atapi-fix.js
 installAtapiCdromFix(emulator)
-// Preset discs sit next to the disks they ship with, so derive their base from the
-// world rather than a module constant. Any disk will do: a world is only required to
-// have one, and it needn't be hda.
+// preset discs sit next to the disks they ship with, so derive their base from the
+// world. any disk will do: a world is only required to have one and it needn't be hda
 const assetBase = (Object.values(world.disks)[0]?.url ?? '/vm/').replace(
   /[^/]*$/,
   ''
@@ -588,17 +649,12 @@ $('cdrom-slot')?.replaceWith(
   createCdromControl({ emulator, presets: PRESETS, setStatus })
 )
 
-// Like power-cycling the PC: reboots the CPU + reloads the BIOS and clears RAM, so
-// Win98 comes up from a cold start. The disks (C:, D:, and whatever's in the CD-ROM
-// drive) are untouched — unlike "Reset" below, no disk state is discarded, and the
-// machine boots straight back into the current C:.
+// power-cycles the pc: the disks (C:, D:, and whatever is in the cd-rom drive) survive
 //
-// We must zero RAM ourselves: v86's restart() (-> cpu.reboot_internal()) deliberately
-// leaves memory intact, which is a *warm* reboot. Win98 does not survive that here — it
-// boots on top of the previous session's stale VMM structures and wedges (bare desktop,
-// hourglass, ring-0 spin forever). Clearing RAM first turns it into a real cold boot,
-// which also makes this the recovery path for a memory-corrupted session (e.g. a broken
-// ?share= snapshot): the poisoned RAM is thrown away and only the clean disk survives.
+// ram has to be zeroed by hand: v86's restart() (-> cpu.reboot_internal()) leaves memory
+// intact, which is a warm reboot, and win98 does not survive that here (it boots on top
+// of the previous session's stale vmm structures and wedges on a bare desktop). that
+// also makes this the recovery path for a memory-corrupted session, e.g. a bad ?share=
 $('reboot')?.addEventListener('click', () => {
   if (
     !confirm(
@@ -607,15 +663,14 @@ $('reboot')?.addEventListener('click', () => {
   )
     return
   const cpu = emulator.v86.cpu
-  cpu.zero_memory(0, cpu.memory_size[0]) // cold boot: discard RAM (see above)
-  emulator.restart() // synchronous — cpu.reboot_internal() has already run by the time this returns
+  cpu.zero_memory(0, cpu.memory_size[0])
+  emulator.restart() // synchronous: cpu.reboot_internal() has run by the time this returns
   setStatus(`rebooted ${clock()}`)
 })
 
-// Reset always completes, deliberately: it is the escape hatch for a machine that is
-// already in a bad state, so it must not be refusable. But if another tab has saved since
-// this one loaded, the machine being discarded is not the one the user has in mind, so they
-// get told before it goes.
+// reset always completes, deliberately: it is the escape hatch for a machine already in
+// a bad state, so it must not be refusable. if another tab has saved since this one
+// loaded, the machine being discarded is newer than the one on screen, so warn first
 $('reset')?.addEventListener('click', async () => {
   if (!confirm('Discard your saved session and reset to the clean image?'))
     return
@@ -637,16 +692,13 @@ $('reset')?.addEventListener('click', async () => {
   location.replace(url)
 })
 
-// Autosave periodically and when the tab is hidden (best-effort before close).
 setInterval(() => doSave('autosaved', { auto: true }), 120_000)
 
-// Listen on the TOP document (same-origin): the iframe's own visibilitychange is
-// unreliable, and the top document is the authoritative tab-visibility source. We
-// prefer visibilitychange over 'blur' — blur fires on every focus change (devtools,
-// alt-tab to another app, address bar), far too often for a ~65 MB save, and it also
-// fires while the tab is still visible. This only fires when the tab is genuinely
-// hidden (switch/minimize/close). pagehide is a best-effort catch for navigation/
-// close (async may not finish there — the 2-min timer is the real safety net).
+// listen on the top document (same-origin): the iframe's own visibilitychange is
+// unreliable. visibilitychange rather than 'blur' because blur fires on every focus
+// change (devtools, alt-tab, address bar), far too often for a ~65 MB save. pagehide is
+// best-effort for navigation/close; async may not finish there, so the timer above is
+// the real safety net
 const topDoc = (() => {
   try {
     return window.top.document
@@ -656,17 +708,15 @@ const topDoc = (() => {
 })()
 topDoc.addEventListener('visibilitychange', () => {
   const hidden = topDoc.visibilityState === 'hidden'
-  // Recorded rather than acted on: whether a hidden tab's time counts is a policy question
-  // for whatever tallies hours later, and a hidden tab barely executes the guest anyway.
+  // recorded rather than acted on: whether a hidden tab's time counts is a policy
+  // question for whatever tallies hours later
   link.visibility(!hidden)
   if (hidden) doSave('autosaved', { auto: true })
 })
 window.addEventListener('pagehide', () => doSave('autosaved', { auto: true }))
 
-// Warn before the tab actually closes/navigates away, and kick off a best-effort
-// save right then too — visibilitychange usually beats us to it, but this covers
-// browsers/paths where hidden fires late or not at all. beforeunload must be bound
-// on the top window (closing/navigating the iframe alone doesn't leave the page).
+// beforeunload has to be bound on the top window: closing or navigating the iframe
+// alone does not leave the page
 const topWin = (() => {
   try {
     return window.top
@@ -674,16 +724,14 @@ const topWin = (() => {
     return window
   }
 })()
-// Warn only. The visibilitychange handler above has already fired by this point, so a
-// second save here would just race the first (the in-flight one wins and this one is
-// dropped) while making the teardown path slower.
+// warn only: the visibilitychange handler above has already fired by this point, so a
+// save here would just race the in-flight one and be dropped
 topWin.addEventListener('beforeunload', (e) => {
   e.preventDefault()
   e.returnValue = ''
 })
 
-// Expose for poking around in the console. The surface, and what is gated to dev, is in
-// debug.js; it exists because driving this machine from a console is how it gets debugged.
+// console handle for debugging; what it exposes and what is gated to dev is in debug.js
 window.like99 = installDebug({
   emulator,
   link,

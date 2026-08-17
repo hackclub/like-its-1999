@@ -1,21 +1,15 @@
-// Re-encode one uploaded image file (see media-import.js, which combines this with
-// audio-import.js behind a single "upload files" picker).
+// re-encode one uploaded image file (see media-import.js, which routes uploads to the
+// three pipelines by extension).
 //
-// The actual security boundary is the re-encode, not a magic-byte/extension check:
-// decoding into pixels and re-serializing only round-trips *decoded pixel data*, so a
-// non-image renamed to look like one (e.g. some-page.html -> photo.png) is rejected
-// outright — it simply fails to decode — and no bytes from the original file, hidden
-// payload or otherwise, ever reach the guest. Only real pixels survive the trip. This
-// holds for both re-encode paths below (canvas, and the GIF decoder+encoder pair).
+// the security boundary is the re-encode, not a magic-byte or extension check: both
+// paths below (canvas, and the GIF decoder + encoder pair) round-trip decoded pixel
+// data only, so a non-image renamed to look like one fails to decode and is rejected,
+// and no bytes from the original file reach the guest
 import { GifReader } from 'omggif'
 import { GIFEncoder, quantize, applyPalette } from 'gifenc'
 
-// Bounds each file's *density*, not the batch's total size: no VGA card Win98 ever
-// shipped with drives a screen anywhere near this large, so nothing legitimate needs
-// more pixels than this — comfortably above any resolution this VM's display actually
-// runs at, leaving headroom for zooming in inside Paint Shop Pro. How many images
-// someone imports, or how large one is *before* re-encode, isn't bounded — only the
-// output's pixel count is.
+// bounds the output's pixel count per file, not the batch's total size. well above any
+// resolution this VM's display runs at, with headroom for zooming inside Paint Shop Pro
 const MAX_IMAGE_DIMENSION = 2048
 
 function clampedSize(width, height) {
@@ -40,9 +34,8 @@ function canvasToBlob(canvas, type, quality) {
   )
 }
 
-// Re-encode a non-animated image via canvas. createImageBitmap only ever yields a
-// GIF's first frame, which is why animated GIFs are routed to reencodeGif instead —
-// this path is for everything else (JPEG, WEBP, HEIC, static PNG/GIF, ...).
+// createImageBitmap only ever yields a GIF's first frame, which is why GIFs route to
+// reencodeGif; this path takes everything else (JPEG, WEBP, HEIC, PNG, ...)
 async function reencodeStill(file) {
   let bitmap
   try {
@@ -90,9 +83,8 @@ function clearRect(dst, dstWidth, x, y, w, h) {
   }
 }
 
-// Downscale one full-canvas RGBA frame via a throwaway canvas pair — reused by the
-// GIF path below when a source exceeds MAX_IMAGE_DIMENSION (rare; legacy web GIFs are
-// almost always small already, but this keeps the guarantee uniform with stills).
+// used by the GIF path when a source exceeds MAX_IMAGE_DIMENSION, keeping the bound
+// uniform with stills
 function downscaleRGBA(rgba, width, height, newWidth, newHeight) {
   const src = document.createElement('canvas')
   src.width = width
@@ -106,20 +98,14 @@ function downscaleRGBA(rgba, width, height, newWidth, newHeight) {
   return dctx.getImageData(0, 0, newWidth, newHeight).data
 }
 
-// Re-encode an animated GIF frame-by-frame, preserving animation. canvas/toBlob can
-// only ever emit a single still frame, so this bypasses canvas entirely: omggif
-// decodes each raw frame (applying the standard GIF disposal-method compositing —
-// "leave", "restore to background", "restore to previous" — to get each frame's true
-// full-canvas visual), and gifenc quantizes + re-encodes into a fresh GIF. No bytes
-// from the original file survive; only decoded RGBA pixels do.
+// canvas/toBlob can only emit a single still frame, so animated GIFs bypass canvas:
+// omggif decodes each raw frame, applying GIF disposal-method compositing to recover
+// each frame's full-canvas visual, and gifenc re-encodes into a fresh GIF.
 //
-// All frames share one quantized palette (computed from every frame's pixels at
-// once) instead of a fresh one per frame. gifenc has no delta/dirty-rect frame
-// support (it always writes a full width*height frame — checked its source), so a
-// per-frame palette was the biggest avoidable overhead: a 256-color local color
-// table costs ~768-1024 bytes, repeated on *every* frame, easily dwarfing the actual
-// pixel data on small/many-frame decorative GIFs. A shared palette needs writing
-// only once (as the global table on frame 0).
+// all frames share one palette, quantized over every frame's pixels at once, written
+// once as the global table on frame 0. gifenc has no delta/dirty-rect frame support
+// (it always writes a full width*height frame), so a per-frame 256-color local table
+// at ~768-1024 bytes would dwarf the pixel data on small many-frame GIFs
 function reencodeGif(file, bytes) {
   let reader
   try {
@@ -135,8 +121,8 @@ function reencodeGif(file, bytes) {
 
   for (let i = 0; i < reader.numFrames(); i++) {
     const frame = reader.frameInfo(i)
-    // "Restore to previous" needs a snapshot of what was under this frame *before*
-    // it's drawn, so it can be put back after this frame's delay elapses.
+    // "restore to previous" needs what was under this frame before it's drawn, to put
+    // back once this frame's delay elapses
     const saved =
       frame.disposal === 3
         ? readRect(
@@ -202,8 +188,7 @@ function reencodeGif(file, bytes) {
   return { ext: 'GIF', data: gif.bytes() }
 }
 
-// Re-encode one File as an image. Returns { ext, data }; throws if it won't decode
-// as one (the caller — media-import.js — takes that as "try the audio pipeline").
+// returns { ext, data }; throws if the file won't decode as an image
 export async function reencodeImage(file) {
   const bytes = new Uint8Array(await file.arrayBuffer())
   const isGif =
@@ -211,6 +196,6 @@ export async function reencodeImage(file) {
     bytes[0] === 0x47 &&
     bytes[1] === 0x49 &&
     bytes[2] === 0x46 &&
-    bytes[3] === 0x38 // "GIF8" — magic bytes, not file.type/extension
+    bytes[3] === 0x38 // "GIF8", magic bytes rather than file.type/extension
   return isGif ? reencodeGif(file, bytes) : reencodeStill(file)
 }

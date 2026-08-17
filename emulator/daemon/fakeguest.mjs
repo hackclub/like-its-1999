@@ -1,12 +1,10 @@
-// A guest that speaks the protocol, for testing the host half without a VM.
+// a guest that speaks the protocol, for testing the host half without a VM
 //
-// It plays parent and child together, because from the host's side that distinction is
-// only ever a `role` field and which frames come back. What makes it useful is the
-// `quirks`: the failure modes PROTOCOL.md promises to survive are hard to provoke in a
-// real guest and trivial here.
+// it plays parent and child together, because from the host's side that distinction is only
+// a `role` field and which frames come back. the `quirks` are the point: the failure modes
+// PROTOCOL.md promises to survive are hard to provoke in a real guest and trivial here
 //
-// Not a reference implementation. The C parent is the real one; this exists to make the
-// host's state machine face a peer that misbehaves on demand.
+// not a reference implementation; the C parent is the real one
 
 import {
   TYPES,
@@ -72,20 +70,20 @@ export function createFakeGuest({
         return
 
       case TYPES.ANNOUNCE:
-        // The guest always adopts the host's epoch: a fresh page wins over whatever a
-        // restored snapshot was mid-conversation with.
+        // the guest always adopts the host's epoch: a fresh page wins over whatever a
+        // restored snapshot was mid-conversation with
         g.epoch = epoch
         if (!g.quirks.dropIdent) identify()
         return
 
       default:
-        // Everything else is answered in the host's epoch, whatever we think ours is.
+        // everything else is answered in the host's epoch, whatever we think ours is
         break
     }
 
     if (frame.type === TYPES.PAYLOAD_BEGIN) {
       const [h, len] = [fieldText(rest[0]), fieldInt(rest[1])]
-      // Always restart from scratch, discarding any partial transfer.
+      // always restart from scratch, discarding any partial transfer
       g.transfer = { hash: h, len, got: 0, seqs: [], chunks: [] }
       return
     }
@@ -97,8 +95,8 @@ export function createFakeGuest({
       g.transfer.seqs.push(seq)
       g.transfer.got += bytes.length
       g.transfer.chunks.push(bytes)
-      // Acknowledge, which is what lets the host send the next one. A guest that does not
-      // (quirks.dropAcks) is how the host's transfer timeout gets tested.
+      // acknowledging is what lets the host send the next one, so a guest that does not
+      // (quirks.dropAcks) is how the host's transfer timeout gets tested
       if (!g.quirks.dropAcks)
         emit(TYPES.STATUS, [epoch, 'payload-ack', String(seq)])
       return
@@ -121,7 +119,7 @@ export function createFakeGuest({
         at += c.length
       }
       g.received.push({ hash: t.hash, bytes: all })
-      // "Spawn" it: from here on we are the child, running that build.
+      // "spawn" it: from here on we are the child, running that build
       g.role = 'child'
       g.hash = t.hash
       emit(TYPES.STATUS, [epoch, 'child-up', t.hash])
@@ -157,17 +155,17 @@ export function createFakeGuest({
   return {
     state: g,
 
-    // Bytes from the host.
+    // bytes from the host
     feed(bytes) {
       for (const frame of decoder.push(bytes)) handle(frame)
     },
 
-    // Push an unsolicited event, the way a foreground change arrives.
+    // an unsolicited event, the way a foreground change arrives
     event(name, ...data) {
       emit(TYPES.EVENT, [g.epoch, name, ...data])
     },
 
-    // Any frame at all, for cases the helpers don't cover.
+    // any frame at all, for cases the helpers don't cover
     send(type, ...fields) {
       emit(type, [g.epoch, ...fields])
     },
@@ -176,9 +174,9 @@ export function createFakeGuest({
       emit(TYPES.STATUS, [g.epoch, code, detail])
     },
 
-    // The child died: the parent notices, says so, and re-identifies so the host can
-    // decide whether to push a replacement (the parent cannot always respawn from cache —
-    // a cold-booted machine has none, since guest writes only live in the overlay).
+    // the child died: the parent notices, says so, and re-identifies so the host can decide
+    // whether to push a replacement (it cannot always respawn from cache, since a cold-booted
+    // machine has none: guest writes only live in the overlay)
     childDown(detail = 'exit 1') {
       g.role = 'parent'
       g.hash = ''
@@ -186,14 +184,14 @@ export function createFakeGuest({
       identify()
     },
 
-    // Emit a frame and cut it in half, leaving a partial frame in the host's buffer —
-    // exactly what a snapshot taken mid-transmission produces.
+    // emit a frame and cut it in half, leaving a partial frame in the host's buffer, which
+    // is what a snapshot taken mid-transmission produces
     halfFrame(type = TYPES.EVENT, fields = ['win', 'A.EXE', 'a']) {
       const full = encode(type, [g.epoch, ...fields])
       onSend(full.subarray(0, Math.max(4, Math.floor(full.length / 2))))
     },
 
-    // A reply addressed to a call from a previous page, replayed after a restore.
+    // a reply addressed to a call from a previous page, replayed after a restore
     replayStaleReply(epoch = 'OLD-EPOCH', id = '1') {
       onSend(encode(TYPES.REPLY, [epoch, id, '1', 'stale']))
     },
@@ -204,9 +202,9 @@ export function createFakeGuest({
   }
 }
 
-// Wire a host agent and a fake guest into each other, so a test can drive a whole
-// conversation. Frames the host wants to send are encoded and fed to the guest; bytes the
-// guest emits are decoded and handed to onFrame.
+// wire a host agent and a fake guest into each other so a test can drive a whole
+// conversation: frames the host sends are encoded and fed to the guest, and bytes the guest
+// emits are decoded and handed to onFrame
 export function connect(agentModule, agent, guestOptions = {}) {
   const decoder = createDecoder()
   const events = []
@@ -244,7 +242,7 @@ export function connect(agentModule, agent, guestOptions = {}) {
       if (c) send([c.frame])
       return c
     },
-    // Drop the host's partial-frame buffer, the way a page reload does.
+    // drop the host's partial-frame buffer, the way a page reload does
     reloadHost() {
       decoder.reset()
     },

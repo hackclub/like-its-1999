@@ -1,10 +1,7 @@
 // node --test emulator/session.test.mjs
 //
-// The boot/save state machine, enumerated. This is where every bug in the save feature
-// has been, so the tests are deliberately exhaustive rather than representative: the two
-// regressions found by hand (an empty slot clobbering a save that appeared later, and
-// ?fresh=1 being unable to save at all) each get a named test, and the full cross product
-// of the save guards is checked rather than sampled.
+// the boot/save state machine, enumerated: the save guards are checked as a full cross
+// product rather than sampled
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -18,7 +15,7 @@ import {
   BOOT_SOURCES,
 } from './session.js'
 
-// Stand-ins: planBoot only ever reads identity off these.
+// planBoot only ever reads identity off these
 const saveFile = (id) => ({ id })
 const shared = {
   save: saveFile('shared'),
@@ -50,8 +47,8 @@ test('a shared machine wins over everything and never claims a generation', () =
       const plan = planBoot({ params, shared, saved, world: withSnapshot })
       assert.equal(plan.source, 'shared')
       assert.equal(plan.prior.id, 'shared')
-      // null, not 0: a confirmed save over someone else's machine is deliberate, and a
-      // generation check would refuse it.
+      // null, not 0: a generation check would refuse a deliberate save over someone
+      // else's machine
       assert.equal(plan.gen, null)
       assert.equal(plan.note, 'shared machine')
       assert.equal(plan.blocked, null)
@@ -59,8 +56,6 @@ test('a shared machine wins over everything and never claims a generation', () =
 })
 
 test('?fresh=1 cold boots and can still save', () => {
-  // The regression: fresh never reads the stored save, so claiming gen 0 got checked
-  // against a real save and the write was refused with "another tab saved this machine".
   const plan = planBoot({
     params: { fresh: true },
     saved: null,
@@ -76,9 +71,6 @@ test('?fresh=1 cold boots and can still save', () => {
 })
 
 test('?fresh=1 does not silently destroy a machine that is stored', () => {
-  // The dangerous version: fresh claims no generation, so the 120-second autosave replaced
-  // hours of somebody's work two minutes after a URL parameter, with no click involved.
-  // Now it starts blocked, which autosaves decline in silence.
   const plan = planBoot({
     params: { fresh: true },
     saved: null,
@@ -100,13 +92,12 @@ test('?fresh=1 does not silently destroy a machine that is stored', () => {
     'and says nothing, since nobody asked'
   )
 
-  // A deliberate save, having been shown what it replaces, goes through and skips the
-  // generation check — there is no generation to claim after ignoring the slot.
+  // a deliberate save skips the generation check: nothing was claimed after ignoring
+  // the slot
   const forced = planSave({ session, force: true })
   assert.equal(forced.allowed, true)
   assert.equal(forced.expectGen, null)
 
-  // And with nothing stored, fresh saves without ceremony.
   const empty = planBoot({ params: { fresh: true }, world: withSnapshot })
   assert.equal(empty.blocked, null)
   assert.equal(
@@ -145,9 +136,6 @@ test('an unreadable save is booted around, never overwritten', () => {
   assert.equal(plan.prior, null)
   assert.match(plan.note, /not overwriting/)
 
-  // And no save may proceed unless it is forced. The refusal quotes the reason, because
-  // reusing one message for every blocked session had a fresh boot claiming this build
-  // could not read a machine it reads perfectly well.
   const session = sessionFrom(plan)
   assert.equal(planSave({ session }).allowed, false)
   assert.equal(planSave({ session }).reason, plan.blocked)
@@ -157,8 +145,6 @@ test('an unreadable save is booted around, never overwritten', () => {
 })
 
 test('with nothing stored, an empty slot is still a claim that gets checked', () => {
-  // The regression: gen null here let a tab that booted into an empty slot overwrite a
-  // machine another tab created afterwards.
   const plan = planBoot({ saved: null, world: withSnapshot })
   assert.equal(plan.source, 'snapshot')
   assert.equal(plan.gen, 0, 'must be 0 ("I believe nothing is here"), not null')
@@ -187,15 +173,12 @@ test('cold boots when there is no snapshot, or the snapshot is older than the di
   assert.equal(stale.source, 'cold')
   assert.equal(stale.note, 'snapshot older than disks — cold booting')
 
-  // A stale snapshot must not override a session we can actually restore.
   const restored = planBoot({ saved: stored(), world: staleSnapshot })
   assert.equal(restored.source, 'saved')
   assert.equal(restored.note, '')
 })
 
 test('a fresh boot over a stored machine still explains a bad world', () => {
-  // Two notes at once. The fresh message used to overwrite the world one, so
-  // ?fresh=1&world=bogus said nothing about why it was not the world you asked for.
   const plan = planBoot({
     params: { fresh: true },
     world: withSnapshot,
@@ -209,7 +192,6 @@ test('a fresh boot over a stored machine still explains a bad world', () => {
 test('a world-resolution message survives to the toolbar', () => {
   const plan = planBoot({ world: withSnapshot, worldNote: 'unknown world "x"' })
   assert.equal(plan.note, 'unknown world "x"')
-  // But a more specific note about how we booted takes precedence.
   const rebuilt = planBoot({
     world: noSnapshot,
     otherDevSaves: true,
@@ -245,10 +227,8 @@ test('planBoot always returns a known source and never throws on sparse input', 
             assert.ok(BOOT_SOURCES.includes(plan.source), JSON.stringify(plan))
             assert.equal(typeof plan.note, 'string')
             assert.ok(plan.gen === null || Number.isInteger(plan.gen))
-            // A source that needs bytes must have named where they come from.
             if (plan.source === 'saved') assert.ok(plan.prior)
             if (plan.source === 'shared') assert.ok(plan.prior)
-            // Never both restore a session and refuse to write it.
             if (plan.blocked) assert.notEqual(plan.source, 'saved')
           }
 })
@@ -297,7 +277,7 @@ test('the save guards, as a full cross product', () => {
     })
     const label = JSON.stringify(c)
 
-    // The rules, restated independently of the implementation.
+    // the rules, restated independently of the implementation
     const expected =
       !c.nosave &&
       !(c.auto && c.isShared) &&
@@ -309,7 +289,6 @@ test('the save guards, as a full cross product', () => {
       assert.equal(verdict.expectGen, c.force ? null : c.gen, label)
       assert.equal(verdict.withThumb, !c.auto, label)
     } else {
-      // An autosave that declines must never talk to the user.
       if (c.auto) assert.equal(verdict.reason, null, label)
       else if (!(c.auto && c.isShared))
         assert.equal(typeof verdict.reason, 'string', label)
@@ -319,16 +298,15 @@ test('the save guards, as a full cross product', () => {
 })
 
 test('never writes a thumbnail on an autosave', () => {
-  // Rendering and PNG-encoding a frame on the pagehide path races the tab closing, and
-  // the stored thumbnail carries forward untouched anyway.
+  // encoding a png on the pagehide path races the tab closing, and the stored thumbnail
+  // carries forward untouched anyway
   assert.equal(planSave({ session: ok, auto: true }).withThumb, false)
   assert.equal(planSave({ session: ok, auto: false }).withThumb, true)
 })
 
 test('null and undefined generations mean different things', () => {
-  // A missing generation means we never looked, which is a claim of "nothing is stored"
-  // and must be checked. An explicit null means don't check (fresh boot, shared machine).
-  // Collapsing the two with `??` is exactly what re-broke saving after ?fresh=1.
+  // undefined means "we never looked", a claim that nothing is stored, so it gets
+  // checked; explicit null means do not check (fresh boot, shared machine)
   assert.equal(planSave({ session: { blocked: null } }).expectGen, 0)
   assert.equal(
     planSave({ session: { gen: null, blocked: null } }).expectGen,
@@ -348,7 +326,6 @@ test('a completed save becomes the basis for the next one', () => {
   assert.equal(next.prior.id, 'written')
   assert.equal(next.gen, 4)
   assert.equal(next.blocked, null)
-  // The compare-and-swap for the following save expects what we just wrote.
   assert.equal(planSave({ session: next }).expectGen, 4)
 })
 
@@ -393,8 +370,8 @@ test('a machine for another world reloads into that world', () => {
 })
 
 test('a machine for a world this build cannot resolve is refused', () => {
-  // Storing it would put a machine in a slot that no later page load could ever open,
-  // because a reload can only find a registered world or the current local image.
+  // a reload can only find a registered world or the current local image, so storing it
+  // would fill a slot no later page load could open
   const v = planImport({
     imported: importOf({ needsReload: true, resolvable: false }),
   })
@@ -410,7 +387,7 @@ test('?nosave=1 refuses an import it would have to store', () => {
   assert.match(v.refuse, /not possible with \?nosave/)
   assert.equal(v.needsConfirm, false)
 
-  // A same-world import needs no store to be applied, so it is still allowed.
+  // a same-world import needs no store, so it is still allowed
   const same = planImport({ imported: importOf(), params: { nosave: true } })
   assert.equal(same.refuse, null)
 })

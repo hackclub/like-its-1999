@@ -1,15 +1,6 @@
-// High-level: open the filesystem a v86 state describes, browse it, and export
-// directories as ZIPs — reading only the disk bytes actually needed.
-//
-// The reusable pieces:
-//   openStateFs(stateBytes, baseSource[, opts]) -> { fs, dev, overlayIndex }
-//   pickHdaOverlay / classifyOverlays — figure out which overlay is which disk
-//   FatFs (fat.js) — readdir / readFile / walk
-//   zipTree / zipFiles (zip.js, fflate-backed) — package a walked tree / a flat list
-//
-// It runs unchanged in Node and the browser; only the *sources* differ (a local file
-// vs. an HTTP Range URL) and those are injected. A `import.meta.main` CLI at the
-// bottom drives the Node case.
+// open the filesystem a v86 state describes, browse it, and export directories as
+// zips, reading only the disk bytes needed. runs unchanged in node and the browser;
+// the byte source (local file vs http range url) is injected
 
 import { parseState, maybeGunzip } from './state.js'
 import { detectFormat, readSaveFile } from '../savefile.js'
@@ -17,18 +8,17 @@ import { OverlayBlockDevice } from './blockdev.js'
 import { FatFs } from './fat.js'
 import { zipTree, zipFiles } from './zip.js'
 
-// Accept any shape a saved machine comes in: a `.99sv` container, or the raw/gzipped
-// v86 state that every v1 save and published share link is.
+// a saved machine is either a .99sv container or the raw/gzipped v86 state that every
+// v1 save and published share link is
 export async function unwrapState(bytes) {
   if (detectFormat(bytes) === 'container')
     return (await readSaveFile(bytes)).state()
   return maybeGunzip(bytes)
 }
 
-// Mount a FAT filesystem from a state's disk overlay painted over a base image.
-// If overlayIndex is omitted we try each overlay and keep the one that yields a
-// filesystem where a probe path resolves (default probe: '/WINDOWS', which exists on
-// the C: image). Returns { fs, dev, overlayIndex, overlays }.
+// mount a FAT filesystem from a state's disk overlay painted over a base image. with
+// no overlayIndex, try each overlay and keep the one where the probe path resolves
+// ('/WINDOWS' exists on the C: image)
 export async function openStateFs(stateBytes, baseSource, opts = {}) {
   const raw = await unwrapState(stateBytes)
   const { overlays, blockSize } = parseState(raw)
@@ -45,7 +35,6 @@ export async function openStateFs(stateBytes, baseSource, opts = {}) {
       const fs = await FatFs.open(dev, opts.fat)
       if (opts.overlayIndex != null)
         return { fs, dev, overlayIndex: idx, overlays }
-      // Probe: does the expected directory exist and parse?
       await fs.resolve(probe)
       return { fs, dev, overlayIndex: idx, overlays }
     } catch (e) {
@@ -57,28 +46,22 @@ export async function openStateFs(stateBytes, baseSource, opts = {}) {
   )
 }
 
-// Export a directory (by path) from a mounted FatFs as a ZIP Uint8Array.
 export async function exportDirZip(fs, path, opts = {}) {
   const tree = await fs.walk(path)
   return zipTree(fs, tree, opts)
 }
 
-// Export an explicit list of files as a flat ZIP.
+// flat zip, no directory structure
 export async function exportFilesZip(fs, paths, opts = {}) {
   return zipFiles(fs, paths, opts)
 }
 
-// ---------------------------------------------------------------------------------
-// Node CLI:  node extract.js <command> [args]
-//
-//   ls      <state> <base> [path]              list a directory (default /)
-//   tree    <state> <base> [path]              recursive listing
-//   zip     <state> <base> <path> <out.zip>    export a directory as a zip
-//   find    <state> <base> <name> [startPath]  find entries by (case-insensitive) name
-//
-// <state> is a .99sv save container or a raw/gzipped v86 state. <base> is the base disk image
-// (e.g. public/vm/hda.img) — only the ranges needed are read from it.
-// ---------------------------------------------------------------------------------
+// node CLI: <state> is a .99sv container or a raw/gzipped v86 state, <base> is the
+// base disk image (e.g. public/vm/hda.img) and only the ranges needed are read from it
+//   ls    <state> <base> [path]              list a directory (default /)
+//   tree  <state> <base> [path]              recursive listing
+//   zip   <state> <base> <path> <out.zip>    export a directory as a zip
+//   find  <state> <base> <name> [startPath]  find entries by case-insensitive name
 
 const isMain =
   typeof process !== 'undefined' &&
@@ -103,7 +86,7 @@ if (isMain) {
 
   const stateBytes = new Uint8Array(await fsp.readFile(statePath))
   const base = await nodeFileSource(basePath)
-  const probe = process.env.VMFS_PROBE // allow overriding the mount probe
+  const probe = process.env.VMFS_PROBE
   const overlayIndex =
     process.env.VMFS_OVERLAY != null
       ? Number(process.env.VMFS_OVERLAY)

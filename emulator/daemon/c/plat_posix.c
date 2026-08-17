@@ -1,9 +1,7 @@
-/* The macOS/POSIX implementation of plat.h, which exists so the parent can be tested.
+/* the macOS/POSIX implementation of plat.h, which exists so the parent can be tested
  *
- * The serial port is stdin/stdout. That is what lets a Node test spawn the real parent
- * binary, speak the real protocol down its stdin, and read frames back from its stdout —
- * the same conversation the browser has with a real guest, minus Windows.
- */
+ * The serial port is stdin/stdout, so a Node test can spawn the real parent binary, speak
+ * the real protocol down its stdin, and read frames back from its stdout. */
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -24,11 +22,9 @@ static int set_nonblock(int fd) {
 }
 
 int p_serial_open(void) {
-  /* A write to a pipe whose reader has gone raises SIGPIPE, whose default action kills the
-   * process. The parent is the one thing here that must not die, and it writes to a child
-   * that is allowed to; the error is handled through EPIPE instead. */
+  /* a write to a pipe whose reader has gone raises SIGPIPE, which by default kills the
+   * process; the parent must not die, so the error is handled through EPIPE instead */
   signal(SIGPIPE, SIG_IGN);
-  /* stdout must stay unbuffered and binary; we never use stdio for it. */
   if (set_nonblock(STDIN_FILENO) != P_OK) return P_FAIL;
   return P_OK;
 }
@@ -36,7 +32,7 @@ int p_serial_open(void) {
 int p_serial_read(u8 *buf, int max) {
   ssize_t n = read(STDIN_FILENO, buf, (size_t)max);
   if (n > 0) return (int)n;
-  if (n == 0) return P_FAIL; /* the other end closed: the page went away */
+  if (n == 0) return P_FAIL; /* the other end closed, so the page went away */
   return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : P_FAIL;
 }
 
@@ -54,7 +50,7 @@ int p_serial_write(const u8 *buf, int len) {
   return P_OK;
 }
 
-/* --- child ---------------------------------------------------------------------- */
+/* --- child --- */
 
 void p_child_init(p_child *c) {
   c->proc = 0;
@@ -64,7 +60,7 @@ void p_child_init(p_child *c) {
   c->nonblocking = 0;
 }
 
-/* Handles are stored as (fd + 1) so that zero always means "none". */
+/* handles are stored as (fd + 1) so zero always means "none" */
 static int fd_of(void *h) { return (int)(long)h - 1; }
 static void *as_handle(int fd) { return (void *)(long)(fd + 1); }
 
@@ -105,8 +101,7 @@ int p_child_spawn(p_child *c, const char *path, const char *arg) {
   close(in[0]);
   close(out[1]);
   set_nonblock(out[0]);
-  /* Same reasoning as the Win32 build: a child that stops reading must not be able to park
-   * the parent inside a write. */
+  /* as on Win32: a child that stops reading must not park the parent inside a write */
   c->nonblocking = set_nonblock(in[1]) == P_OK;
   c->proc = (void *)(long)pid;
   c->to_in = as_handle(in[1]);
@@ -122,7 +117,7 @@ int p_child_alive(p_child *c) {
   pid = (pid_t)(long)c->proc;
   got = waitpid(pid, &status, WNOHANG);
   if (got == pid) {
-    /* Reaped. Close our ends so a restart starts clean. */
+    /* reaped, so close our ends and let a restart start clean */
     if (c->to_in) close(fd_of(c->to_in));
     if (c->from_out) close(fd_of(c->from_out));
     p_child_init(c);
@@ -162,7 +157,7 @@ int p_child_write(p_child *c, const u8 *buf, int len) {
     }
     if (n < 0 && errno == EINTR) continue;
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      /* The child is behind rather than gone. Wait, but not forever. */
+      /* the child is behind rather than gone, so wait but not forever */
       if ((u32)(p_ticks() - deadline) < 0x80000000UL) return P_FAIL;
       usleep(5000);
       continue;
@@ -172,7 +167,7 @@ int p_child_write(p_child *c, const u8 *buf, int len) {
   return P_OK;
 }
 
-/* --- files ---------------------------------------------------------------------- */
+/* --- files --- */
 
 int p_file_write(const char *path, const u8 *buf, int len) {
   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
@@ -233,12 +228,11 @@ int p_env_int(const char *name, int def) {
   return n;
 }
 
-/* --- what the child reports ------------------------------------------------------- */
+/* --- what the child reports --- */
 
-/* There is no foreground window on a build that exists to be tested, so this reads
- * `$DAEMON_DIR/FOREGROUND` (one line of exe, one of title). A test can write that file to
- * simulate the user switching programs, which is how the whole event path gets exercised
- * without a desktop. */
+/* No foreground window here, so this reads `$DAEMON_DIR/FOREGROUND` (one line of exe, one
+ * of title). A test writes that file to simulate the user switching programs, which
+ * exercises the event path without a desktop. */
 void p_foreground(char *exe, int exe_cap, char *title, int title_cap) {
   char base[256], path[300], buf[512];
   int n, i, line = 0, at = 0;
@@ -275,7 +269,7 @@ int p_exec(const char *cmd, char *out, int cap) {
   return status < 0 ? P_FAIL : (status >> 8) & 0xff;
 }
 
-/* --- time and logging ------------------------------------------------------------ */
+/* --- time and logging --- */
 
 u32 p_ticks(void) {
   struct timeval tv;

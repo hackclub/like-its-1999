@@ -1,8 +1,7 @@
 // node --test emulator/daemon/frame.test.mjs
 //
-// The decoder's job is to find real frames in a byte stream that may start mid-frame, may
-// contain the sync word inside payloads, and may be corrupt. So most of this file is
-// adversarial rather than round-trip.
+// the decoder has to find frames in a stream that may start mid-frame, carry the sync
+// word inside payloads, or be corrupt, so most of this file is adversarial
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -115,7 +114,7 @@ test('garbage before a frame is dropped and the frame is still found', () => {
 })
 
 test('a sync word inside a payload does not confuse the decoder', () => {
-  // '99' is a legitimate substring of plenty of real titles.
+  // '99' is a legitimate substring of plenty of real titles
   const frame = encode(TYPES.EVENT, ['win', 'like-its-1999 - EditPlus'])
   const { frames } = decode(frame)
   assert.equal(frames.length, 1)
@@ -145,7 +144,7 @@ test('a corrupted payload is caught by the CRC', () => {
 })
 
 test('a set flag bit makes a frame skippable', () => {
-  // Rule 2: all flags are reserved, so an old reader must skip rather than misread.
+  // rule 2: all flags are reserved, so an old reader must skip rather than misread
   const frame = encode(TYPES.PING, ['1', '9'])
   frame[3] = 0x01
   assert.equal(decode(frame).frames.length, 0)
@@ -159,7 +158,7 @@ test('an oversize length is rejected without buffering', () => {
   const { frames, rest } = decode(header)
   assert.equal(frames.length, 0)
   assert.ok(rest.length < HEADER_SIZE, 'did not sit waiting for a bogus length')
-  // Raw payload trips the frame cap; a single huge field trips the field cap first.
+  // a raw payload trips the frame cap; a single huge field trips the field cap first
   assert.throws(
     () => encode(TYPES.PAYLOAD_DATA, new Uint8Array(MAX_PAYLOAD + 1)),
     /payload too large/
@@ -178,7 +177,7 @@ test('type 0 is not a frame', () => {
 
 test('a maximum-size payload is accepted', () => {
   const big = new Uint8Array(MAX_PAYLOAD - 3) // 3 bytes of field header
-  big.fill(0x39) // all sync words, to be awkward
+  big.fill(0x39) // all sync words
   const frame = encode(TYPES.PAYLOAD_DATA, [big])
   const { frames } = decode(frame)
   assert.equal(frames.length, 1)
@@ -209,8 +208,8 @@ test('the streaming decoder reassembles frames split byte by byte', () => {
 })
 
 test('the streaming decoder survives a mid-frame restore', () => {
-  // Exactly what a v86 snapshot does: the queued tail of an old frame arrives first,
-  // ahead of whatever the new page sends.
+  // what a v86 snapshot does: the queued tail of an old frame arrives ahead of whatever
+  // the new page sends
   const orphan = encode(TYPES.REPLY, ['1', '5', 'ok']).subarray(0, 6)
   const dec = createDecoder()
   assert.deepEqual(dec.push(orphan), [])
@@ -221,10 +220,8 @@ test('the streaming decoder survives a mid-frame restore', () => {
 })
 
 test('a stale header claiming a huge length does not swallow later frames', () => {
-  // The restore hazard that matters most, and the one the old decoder failed: a snapshot
-  // leaves a plausible header in the UART declaring 64 KB, so every frame behind it became
-  // "payload" until that much traffic had arrived. On a link whose only traffic is an
-  // announce every two seconds, the guest would have been deaf for minutes.
+  // a snapshot can leave a plausible header in the uart declaring 64 KB, which would
+  // swallow every frame behind it until that much traffic had arrived
   const stale = new Uint8Array(HEADER_SIZE)
   stale.set(SYNC, 0)
   stale[2] = TYPES.IDENT
@@ -236,7 +233,7 @@ test('a stale header claiming a huge length does not swallow later frames', () =
   assert.equal(frames[0].type, TYPES.ANNOUNCE)
   assert.ok(dropped >= stale.length)
 
-  // Same through the streaming decoder, arriving in separate reads.
+  // same through the streaming decoder, arriving in separate reads
   const dec = createDecoder()
   assert.deepEqual(dec.push(stale), [])
   const got = dec.push(real)
@@ -245,8 +242,8 @@ test('a stale header claiming a huge length does not swallow later frames', () =
 })
 
 test('a genuinely incomplete frame is still waited for', () => {
-  // The other half of the rule: when nothing later is provably a frame, the candidate is
-  // kept, because a frame arriving in pieces is the normal case.
+  // the other half of the rule: with nothing later provably a frame, the candidate is
+  // kept, since a frame arriving in pieces is the normal case
   const frame = encode(TYPES.EVENT, ['win', 'EDITPLUS.EXE'])
   const cut = frame.length - 4
   const { frames, rest, dropped } = decode(frame.subarray(0, cut))
@@ -257,7 +254,7 @@ test('a genuinely incomplete frame is still waited for', () => {
 
 test('the streaming decoder refuses to grow without bound on garbage', () => {
   const dec = createDecoder({ maxBuffer: 1024 })
-  // A sync word followed by a plausible length, then never enough bytes.
+  // a sync word followed by a plausible length, then never enough bytes
   const tease = new Uint8Array(HEADER_SIZE)
   tease.set(SYNC, 0)
   tease[2] = TYPES.PING

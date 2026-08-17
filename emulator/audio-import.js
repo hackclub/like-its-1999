@@ -1,18 +1,15 @@
-// Re-encode one uploaded audio/MIDI file (see media-import.js, which combines this
-// with image-import.js behind a single "upload files" picker). Same
-// reencode-not-passthrough security model as image-import.js: only decoded audio
-// samples (or, for MIDI, only parsed note/control events) survive the trip — never
-// the original bytes.
+// re-encode one uploaded audio/MIDI file. same reencode-not-passthrough model as
+// image-import.js: only decoded samples, or for MIDI only parsed note/control events,
+// survive the trip.
 //
-// Two unrelated pipelines share this module because MIDI isn't audio — it's a
-// sequence of synthesizer events, not samples, so Web Audio's decoder can't touch
-// it; it needs its own parse-and-rewrite path instead of decodeAudioData.
+// two pipelines share this module because MIDI is a sequence of synthesizer events
+// rather than samples, so decodeAudioData can't read it and it needs its own
+// parse-and-rewrite path
 import { parseMidi, writeMidi } from 'midi-file'
 
-// Fixed output quality for real audio, regardless of input — the audio equivalent of
-// image-import.js's MAX_IMAGE_DIMENSION: bound each file's *density* (bytes/sec),
-// not its total size. How long a clip someone imports is up to them; mono/22050Hz is
-// plenty for a background-music-style clip and keeps that density modest either way.
+// bounds each file's density (bytes/sec) rather than its total size, the audio
+// equivalent of image-import.js's MAX_IMAGE_DIMENSION. mono at 22050Hz is enough for a
+// background-music clip
 const SAMPLE_RATE = 22050
 const CHANNELS = 1
 
@@ -26,13 +23,10 @@ function isMidi(bytes) {
   )
 }
 
-// MIDI isn't decoded to samples, it's parsed to events and re-serialized — the same
-// decode-or-reject guarantee, just for a symbolic format instead of a sampled one.
-// SysEx / sequencer-specific / unknown-meta events are legitimate MIDI constructs
-// that carry arbitrary opaque vendor payloads, and midi-file preserves them verbatim
-// across a parse+rewrite — background music never needs them, so they're dropped
-// rather than forwarded, tightening this to the same guarantee as the image
-// pipeline: only meaningful, playable data survives.
+// SysEx, sequencer-specific and unknown-meta events carry arbitrary opaque vendor
+// payloads, and midi-file preserves them verbatim across a parse + rewrite. background
+// music never needs them, so they're dropped rather than forwarded, leaving the same
+// guarantee as the image pipeline: only playable data survives
 function reencodeMidi(file, bytes) {
   let parsed
   try {
@@ -52,8 +46,8 @@ function reencodeMidi(file, bytes) {
   return { ext: 'MID', data: new Uint8Array(writeMidi(parsed)) }
 }
 
-// Hand-written 16-bit PCM WAV — the format hasn't changed since 1991, not worth a
-// dependency for a ~40-line header (same call as vmfs/iso9660.js).
+// hand-written 16-bit PCM WAV; the format hasn't changed since 1991, so a dependency
+// isn't worth it for a ~40-line header (same call as vmfs/iso9660.js)
 function encodeWav(samples, sampleRate) {
   const dataSize = samples.length * 2 // 16-bit mono
   const buf = new ArrayBuffer(44 + dataSize)
@@ -87,8 +81,8 @@ function encodeWav(samples, sampleRate) {
 async function reencodeAudio(file, bytes) {
   let decoded
   try {
-    // Any BaseAudioContext can decode; length/rate here are irrelevant to decoding,
-    // only to how long a silent buffer this throwaway context could render.
+    // any BaseAudioContext can decode; this one's length/rate only bound what it could
+    // render, not what it can decode
     decoded = await new OfflineAudioContext(1, 1, SAMPLE_RATE).decodeAudioData(
       bytes.buffer
     )
@@ -113,9 +107,7 @@ async function reencodeAudio(file, bytes) {
   }
 }
 
-// Re-encode one File as audio/MIDI. Returns { ext, data }; throws if it won't
-// decode/parse as either (the caller — media-import.js — takes that as final: this
-// module is already the fallback for anything the image pipeline couldn't read).
+// returns { ext, data }; throws if the file won't decode as audio or parse as MIDI
 export async function reencodeAudioFile(file) {
   const bytes = new Uint8Array(await file.arrayBuffer())
   return isMidi(bytes) ? reencodeMidi(file, bytes) : reencodeAudio(file, bytes)

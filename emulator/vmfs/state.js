@@ -1,21 +1,19 @@
-// Parse a v86 `save_state` snapshot and expose its disk overlays.
+// parse a v86 `save_state` snapshot and expose its disk overlays
 //
-// State format (v86 v6):
-//   - header: 4× little-endian int32 — [magic, version, total_len, json_len]
-//     magic === 0x86768676, version === 6.
-//   - JSON at [16, 16+json_len): { buffer_infos, state }
-//       buffer_infos[i] = { offset, length } into the data section.
-//       state = the machine state tree; typed arrays are serialised as
-//         { __state_type__, buffer_id } and disk overlays as arrays of
-//         [blockIndex, { buffer_id }] pairs.
-//   - data section starts at (16 + json_len) rounded up to 4 bytes; a buffer's
-//     bytes are data[offset .. offset+length].
+// state format (v86 v6):
+//   header: 4 little-endian int32s [magic, version, total_len, json_len], with
+//     magic 0x86768676 and version 6
+//   json at [16, 16+json_len): { buffer_infos, state }
+//     buffer_infos[i] = { offset, length } into the data section
+//     state = the machine state tree; typed arrays serialise as
+//       { __state_type__, buffer_id } and disk overlays as arrays of
+//       [blockIndex, { buffer_id }] pairs
+//   data section starts at (16 + json_len) rounded up to 4 bytes; a buffer's bytes
+//     are data[offset .. offset+length]
 //
-// A disk overlay is v86's in-memory copy-on-write layer: only the disk blocks the
-// guest actually wrote are present. Each pair maps a block index to a buffer holding
-// that block's bytes; blocks are BLOCK_SIZE bytes and live at blockIndex*BLOCK_SIZE
-// on the disk. To reconstruct the disk as the guest saw it, read the base image and
-// paint these blocks over it.
+// a disk overlay is v86's in-memory copy-on-write layer: only the blocks the guest
+// actually wrote are present, each pair mapping a block index to a buffer holding
+// that block's BLOCK_SIZE bytes at blockIndex*BLOCK_SIZE on the disk
 
 export const STATE_MAGIC = 0x86768676
 export const STATE_VERSION = 6
@@ -27,8 +25,8 @@ function u32(view, off) {
   return view.getUint32(off, true)
 }
 
-// Recognise a serialised disk-overlay: a non-empty array whose every element is
-// [int, { buffer_id }].
+// a serialised overlay is a non-empty array whose every element is
+// [int, { buffer_id }]
 function isBlockPair(e) {
   return (
     Array.isArray(e) &&
@@ -43,7 +41,7 @@ function isOverlay(node) {
   return Array.isArray(node) && node.length > 0 && node.every(isBlockPair)
 }
 
-// Walk the state tree collecting every overlay array, in document order.
+// document order matters: it is the order v86 registered the disks in
 function findOverlays(state) {
   const out = []
   const visit = (node) => {
@@ -61,11 +59,11 @@ function findOverlays(state) {
   return out
 }
 
-// A single disk's overlay: a Map<blockIndex, Uint8Array(BLOCK_SIZE)> plus the byte
-// span it touches. `size` is the disk size hint (max touched byte, for classifying).
+// one disk's overlay: Map<blockIndex, Uint8Array(blockSize)> plus the byte span it
+// touches
 export class DiskOverlay {
   constructor(blocks, blockSize) {
-    this.blocks = blocks // Map<number, Uint8Array>
+    this.blocks = blocks
     this.blockSize = blockSize
     let maxIdx = -1
     for (const idx of blocks.keys()) if (idx > maxIdx) maxIdx = idx
@@ -75,8 +73,6 @@ export class DiskOverlay {
   get blockCount() {
     return this.blocks.size
   }
-  // Bytes written to [offset, offset+len) that fall inside overlay blocks, or null
-  // for a block the guest never wrote. Returns an array of {start, bytes} runs.
   hasBlock(blockIndex) {
     return this.blocks.has(blockIndex)
   }
@@ -85,8 +81,7 @@ export class DiskOverlay {
   }
 }
 
-// Parse a raw (already-decompressed) state ArrayBuffer/Uint8Array.
-// Returns { json, overlays: DiskOverlay[], blockSize }.
+// input must already be decompressed (see maybeGunzip)
 export function parseState(input) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input)
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -113,8 +108,8 @@ export function parseState(input) {
     return bytes.subarray(start, start + info.length)
   }
 
-  // Infer block size from the overlays themselves (all block buffers share it),
-  // falling back to the documented 256.
+  // all block buffers share one size, so take it from the overlays themselves and
+  // fall back to the documented 256
   const overlayArrays = findOverlays(json.state)
   let blockSize = 0
   for (const arr of overlayArrays)
@@ -131,18 +126,15 @@ export function parseState(input) {
   return { json, overlays, blockSize }
 }
 
-// gunzip helper that works in Node and the browser. Accepts ArrayBuffer/Uint8Array,
-// returns Uint8Array. If the data isn't gzip (no 0x1f 0x8b magic) it's returned as-is.
+// input without the 0x1f 0x8b gzip magic is returned unchanged
 export async function maybeGunzip(input) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input)
   if (bytes.length < 2 || bytes[0] !== 0x1f || bytes[1] !== 0x8b) return bytes
-  // Browser / modern runtimes.
   if (typeof DecompressionStream !== 'undefined') {
     const ds = new DecompressionStream('gzip')
     const stream = new Response(bytes).body.pipeThrough(ds)
     return new Uint8Array(await new Response(stream).arrayBuffer())
   }
-  // Node fallback.
   const { gunzipSync } = await import('node:zlib')
   return new Uint8Array(gunzipSync(bytes))
 }

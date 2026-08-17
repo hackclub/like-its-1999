@@ -1,22 +1,20 @@
-// Wire framing for the guest agent. See PROTOCOL.md for the format and the reasoning;
-// this file is the whole of it, and it is pure — no I/O, no emulator, no time.
+// wire framing for the guest agent, see PROTOCOL.md
 //
-// The only subtle part is decoding. The byte stream is not guaranteed to start on a frame
-// boundary (a v86 snapshot restores whatever was queued in the UART, mid-frame included)
-// and a payload can legitimately contain the sync word, so a decoder cannot trust the
-// first sync it sees. `decode` therefore treats every candidate position as a hypothesis
-// and only accepts one whose length is sane and whose CRC checks out.
+// the byte stream is not guaranteed to start on a frame boundary (a v86 snapshot restores
+// whatever was queued in the UART, mid-frame included) and a payload can contain the sync
+// word, so `decode` treats every candidate position as a hypothesis and accepts only one
+// whose length is sane and whose crc checks out
 
 const SYNC0 = 0x39 // '9'
 const SYNC1 = 0x39
 export const SYNC = Uint8Array.of(SYNC0, SYNC1)
 
-// Sync(2) + type(1) + flags(1) + len(4), then the payload, then crc32(4).
+// sync(2) + type(1) + flags(1) + len(4), then the payload, then crc32(4)
 export const HEADER_SIZE = 8
 export const TRAILER_SIZE = 4
 
-// Normative, not advisory: a header claiming more than this is discarded rather than
-// buffered, so a corrupt length can't make a receiver wait for gigabytes.
+// normative: a header claiming more than this is discarded rather than buffered, so a
+// corrupt length can't make a receiver wait for gigabytes
 export const MAX_PAYLOAD = 65536
 
 export const TYPES = {
@@ -41,8 +39,7 @@ export const TYPE_NAMES = Object.fromEntries(
 const te = new TextEncoder()
 const td = new TextDecoder()
 
-// --- CRC-32 (IEEE, the zlib polynomial) -----------------------------------------
-
+// crc-32, ieee (the zlib polynomial)
 const CRC_TABLE = (() => {
   const table = new Int32Array(256)
   for (let i = 0; i < 256; i++) {
@@ -60,11 +57,9 @@ export function crc32(bytes, start = 0, end = bytes.length) {
   return (c ^ -1) >>> 0
 }
 
-// --- field lists ----------------------------------------------------------------
-// count(u8), then per field: len(u16le) + bytes. No escaping, because window titles
-// contain quotes, backslashes, tabs and sometimes newlines, and an escaping scheme is a
-// bug farm shared between a C emitter and a JS parser.
-
+// field list: count(u8), then per field len(u16le) + bytes. no escaping, because window
+// titles contain quotes, backslashes, tabs and sometimes newlines, and any escaping scheme
+// would have to match exactly between the C emitter and the JS parser
 export const MAX_FIELDS = 255
 export const MAX_FIELD_BYTES = 65535
 
@@ -92,9 +87,8 @@ export function encodeFields(fields) {
   return out
 }
 
-// Returns an array of Uint8Array fields, or null if the bytes aren't a well-formed list.
-// Null rather than a throw: a malformed payload is a dropped frame, never an exception
-// that unwinds a receive loop.
+// null rather than a throw: a malformed payload is a dropped frame, never an exception that
+// unwinds a receive loop
 export function decodeFields(bytes) {
   if (bytes.length < 1) return null
   const count = bytes[0]
@@ -109,21 +103,19 @@ export function decodeFields(bytes) {
     out.push(bytes.subarray(at, at + len))
     at += len
   }
-  // Trailing bytes mean we misread the structure; treat it as malformed.
+  // trailing bytes mean we misread the structure
   return at === bytes.length ? out : null
 }
 
 export const fieldText = (f) => (f ? td.decode(f) : '')
 
-// Decimal text in, number out. Returns null for anything that isn't a clean integer, so
-// a caller can drop the frame instead of propagating NaN.
+// decimal text in, number out; null for anything that isn't a clean integer, so a caller can
+// drop the frame instead of propagating NaN
 export function fieldInt(f) {
   const s = fieldText(f)
   if (!/^-?\d{1,15}$/.test(s)) return null
   return Number(s)
 }
-
-// --- frames ---------------------------------------------------------------------
 
 export function encode(type, fields = []) {
   const payload = Array.isArray(fields) ? encodeFields(fields) : fields
@@ -137,8 +129,7 @@ export function encode(type, fields = []) {
   out[3] = 0 // flags: reserved, must be zero
   view.setUint32(4, payload.length, true)
   out.set(payload, HEADER_SIZE)
-  // CRC covers type+flags+len+payload — everything but the sync word, which is a marker
-  // rather than data.
+  // crc covers type+flags+len+payload, everything but the sync word
   view.setUint32(
     HEADER_SIZE + payload.length,
     crc32(out, 2, HEADER_SIZE + payload.length),
@@ -147,23 +138,23 @@ export function encode(type, fields = []) {
   return out
 }
 
-// Pull as many frames as possible out of `buffer`.
+// pull as many frames as possible out of `buffer`
 //
-// Returns { frames, rest, dropped }: `rest` is the unconsumed tail to keep for next time,
-// and `dropped` counts bytes thrown away resyncing (useful as a health signal, since a
-// steady trickle means something upstream is confused).
+// returns { frames, rest, dropped }: `rest` is the unconsumed tail to keep for next time,
+// `dropped` counts bytes thrown away resyncing (a health signal, since a steady trickle
+// means something upstream is confused)
 //
-// A frame is only accepted if flags are zero, the length is within the cap, and the CRC
-// matches. Anything else advances one byte and looks for the next sync: that is what makes
-// a false sync word inside a payload, and a mid-frame restore, both self-healing.
+// a frame is accepted only if flags are zero, the length is within the cap, and the crc
+// matches; anything else advances one byte and looks for the next sync, which is what makes
+// a false sync word inside a payload and a mid-frame restore both self-healing
 export function decode(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const frames = []
   let at = 0
   let dropped = 0
-  // Where an incomplete-but-plausible candidate started, and what `dropped` was then, so
-  // that deciding to wait for it can be unwound. See the incomplete branch below.
+  // where an incomplete-but-plausible candidate started, and what `dropped` was then, so
+  // deciding to wait for it can be unwound
   let stalled = -1
   let stalledDropped = 0
 
@@ -177,7 +168,7 @@ export function decode(buffer) {
     const flags = bytes[at + 3]
     const len = view.getUint32(at + 4, true)
 
-    // Reject before buffering: a bogus length must not make us wait for more bytes.
+    // reject before buffering: a bogus length must not make us wait for more bytes
     if (flags !== 0 || len > MAX_PAYLOAD || type === 0) {
       at++
       dropped++
@@ -185,13 +176,10 @@ export function decode(buffer) {
     }
     const end = at + HEADER_SIZE + len + TRAILER_SIZE
     if (end > bytes.length) {
-      // Incomplete, but not necessarily real. A snapshot restore can leave a stale header
-      // in the UART declaring a huge length, and simply waiting for it swallows every
-      // frame that follows until tens of kilobytes have arrived — minutes of announcements
-      // on an idle link, with nothing getting through. So keep scanning past it: if
-      // anything later proves to be a complete CRC-valid frame, this candidate was noise.
-      // If nothing does, the position is restored below and we wait, because then it may
-      // well be genuine.
+      // incomplete, but not necessarily real: a snapshot restore can leave a stale header in
+      // the UART declaring a huge length, and waiting for it swallows every frame behind it
+      // until tens of kilobytes arrive. so keep scanning; a later complete crc-valid frame
+      // proves this candidate was noise, and if none does the position is restored below
       if (stalled < 0) {
         stalled = at
         stalledDropped = dropped
@@ -207,7 +195,7 @@ export function decode(buffer) {
       dropped++
       continue
     }
-    // A real frame after a stalled candidate proves the candidate was noise.
+    // a real frame proves any stalled candidate was noise
     stalled = -1
     frames.push({
       type,
@@ -224,15 +212,12 @@ export function decode(buffer) {
   return { frames, rest: bytes.subarray(at), dropped }
 }
 
-// A frame plus its decoded fields, or null if the payload isn't a field list. Convenience
-// for callers that always expect fields (everything except PAYLOAD_DATA's raw bytes).
+// for callers that always expect fields, which is everything but PAYLOAD_DATA's raw bytes
 export function withFields(frame) {
   const fields = decodeFields(frame.payload)
   return fields ? { ...frame, fields } : null
 }
 
-// Accumulates bytes across arrivals and yields whole frames. The only stateful thing in
-// this module, and the state is one buffer.
 export function createDecoder({ maxBuffer = MAX_PAYLOAD * 4 } = {}) {
   let buffer = new Uint8Array(0)
   let dropped = 0
@@ -246,8 +231,8 @@ export function createDecoder({ maxBuffer = MAX_PAYLOAD * 4 } = {}) {
       const result = decode(merged)
       dropped += result.dropped
       buffer = result.rest
-      // A partial frame can never exceed one max frame; more than that means we are
-      // accumulating garbage that happens to start with a sync word.
+      // a partial frame can never exceed one max frame; more than that means we are
+      // accumulating garbage that happens to start with a sync word
       if (buffer.length > maxBuffer) {
         dropped += buffer.length
         buffer = new Uint8Array(0)

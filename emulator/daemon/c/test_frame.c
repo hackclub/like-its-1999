@@ -1,11 +1,9 @@
-/* Host-side unit tests for the portable framing, built with clang.
+/* host-side unit tests for the portable framing, built with clang
  *
- * Mirrors ../frame.test.mjs case for case, because the two implementations have to agree
- * and the cheapest way to keep them agreeing is to make them fail the same way. The
- * cross-language golden vectors (test_golden.c) then check they agree byte for byte.
+ * Mirrors ../frame.test.mjs case for case, so the two implementations fail the same way;
+ * the golden vectors in test_golden.c then check they agree byte for byte.
  *
- * Uses printf, which the guest build never does: this binary is host-only.
- */
+ * host-only: uses printf, which the guest build never does */
 #include <stdio.h>
 #include <string.h>
 
@@ -30,7 +28,7 @@ static void eq_int(long got, long want, const char *what) {
   }
 }
 
-/* One frame in, decoded back out. */
+/* one frame in, decoded back out */
 static int roundtrip(u8 type, const char **strs, int n) {
   static u8 payload[F_MAX_PAYLOAD];
   static u8 wire[F_MAX_FRAME];
@@ -69,7 +67,7 @@ static void test_crc(void) {
 
 static void test_roundtrip(void) {
   const char *simple[] = {"win", "EDITPLUS.EXE"};
-  /* The characters that break every delimited text protocol. */
+  /* the characters that break a delimited text protocol */
   const char *nasty[] = {"win", "C:\\My Documents\\a\tb\nc\"d'e\\ - EditPlus", "",
                          "42"};
   printf("round trip\n");
@@ -90,12 +88,12 @@ static void test_decode_hazards(void) {
   printf("decode hazards\n");
   f_build_init(&b, payload, sizeof payload);
   f_add_str(&b, "win");
-  /* '99' inside a payload is a legitimate substring of plenty of real titles. */
+  /* '99' inside a payload is a legitimate substring of plenty of real titles */
   f_add_str(&b, "like-its-1999 - EditPlus");
   plen = f_build_len(&b);
   wlen = f_encode(F_EVENT, payload, plen, wire, sizeof wire);
 
-  /* Garbage first, including a false sync word. */
+  /* garbage first, including a false sync word */
   {
     static const u8 junk[] = {0, 1, 2, 0x39, 0x39, 0xff, 0xff, 3, 4};
     int n = (int)sizeof junk;
@@ -107,42 +105,38 @@ static void test_decode_hazards(void) {
     ok(d.dropped >= (u32)n, "garbage counted as dropped");
   }
 
-  /* A truncated tail is kept, not discarded. */
   f_dec_init(&d);
   f_dec_push(&d, wire, wlen - 3);
   ok(f_dec_next(&d, &out) == 0, "incomplete frame waits");
   f_dec_push(&d, wire + wlen - 3, 3);
   ok(f_dec_next(&d, &out) == 1, "and completes when the rest arrives");
 
-  /* Bad CRC. */
   f_dec_init(&d);
   wire[wlen - 1] ^= 0xff;
   f_dec_push(&d, wire, wlen);
   ok(f_dec_next(&d, &out) == 0, "bad crc rejected");
   wire[wlen - 1] ^= 0xff;
 
-  /* A corrupted payload is caught by the CRC. */
   f_dec_init(&d);
   wire[F_HEADER + 4] ^= 0x01;
   f_dec_push(&d, wire, wlen);
   ok(f_dec_next(&d, &out) == 0, "corrupt payload rejected");
   wire[F_HEADER + 4] ^= 0x01;
 
-  /* Any flag bit set means skip: they are all reserved. */
+  /* the flag bits are all reserved, so any of them set means skip */
   f_dec_init(&d);
   wire[3] = 0x01;
   f_dec_push(&d, wire, wlen);
   ok(f_dec_next(&d, &out) == 0, "reserved flag makes a frame skippable");
   wire[3] = 0;
 
-  /* Type 0 is not a frame. */
   f_dec_init(&d);
   wire[2] = 0;
   f_dec_push(&d, wire, wlen);
   ok(f_dec_next(&d, &out) == 0, "type 0 rejected");
   wire[2] = F_EVENT;
 
-  /* An oversize length is rejected without waiting for the bytes. */
+  /* an oversize length is rejected without waiting for the bytes */
   {
     u8 header[F_HEADER];
     header[0] = F_SYNC0;
@@ -159,7 +153,7 @@ static void test_decode_hazards(void) {
     ok(d.dropped > 0, "and dropped rather than buffered");
   }
 
-  /* Byte-at-a-time delivery, the way a UART actually arrives. */
+  /* byte-at-a-time delivery, the way a UART actually arrives */
   f_dec_init(&d);
   for (i = 0; i < wlen; i++) {
     f_dec_push(&d, wire + i, 1);
@@ -167,7 +161,6 @@ static void test_decode_hazards(void) {
   }
   ok(f_dec_next(&d, &out) == 1, "reassembled byte by byte");
 
-  /* Two frames in one push. */
   memcpy(junkwire, wire, wlen);
   memcpy(junkwire + wlen, wire, wlen);
   f_dec_init(&d);
@@ -176,7 +169,7 @@ static void test_decode_hazards(void) {
   ok(f_dec_next(&d, &out) == 1, "second of two");
   ok(f_dec_next(&d, &out) == 0, "and no third");
 
-  /* A maximum-size payload, filled with sync words to be awkward. */
+  /* a maximum-size payload, filled with sync words to be awkward */
   {
     static u8 big[F_MAX_PAYLOAD];
     static u8 bigwire[F_MAX_FRAME];
@@ -193,11 +186,8 @@ static void test_decode_hazards(void) {
   }
 }
 
-/* A single read can carry more than the buffer holds. The decoder must accept what fits,
- * say how much it took, and lose nothing — the first version silently discarded the
- * overflow, which ate whole frames and was caught by the cross-language golden test. */
-/* The restore hazard: a stale header declaring a huge length must not swallow the frames
- * behind it. This is the C half of the same rule as frame.js. */
+/* the restore hazard: a stale header declaring a huge length must not swallow the frames
+ * behind it; C half of the same rule as frame.js */
 static void test_stale_header_resync(void) {
   static u8 wire[F_MAX_FRAME];
   static u8 buf[F_MAX_FRAME];
@@ -214,7 +204,7 @@ static void test_stale_header_resync(void) {
   plen = f_build_len(&b);
   wlen = f_encode(F_ANNOUNCE, payload, plen, wire, sizeof wire);
 
-  /* sync, a valid type, zero flags, and a length of 64 KiB that will never arrive. */
+  /* sync, a valid type, zero flags, and a length of 64 KiB that will never arrive */
   buf[n++] = F_SYNC0;
   buf[n++] = F_SYNC1;
   buf[n++] = F_IDENT;
@@ -232,7 +222,7 @@ static void test_stale_header_resync(void) {
   eq_int(out.type, F_ANNOUNCE, "and it is the announce, not the stale candidate");
   ok(d.dropped >= 8, "the stale header was counted as dropped");
 
-  /* And the other half of the rule: a frame genuinely arriving in pieces is waited for. */
+  /* the other half of the rule: a frame genuinely arriving in pieces is waited for */
   f_dec_init(&d);
   f_dec_push(&d, wire, wlen - 3);
   ok(f_dec_next(&d, &out) == 0, "an incomplete frame yields nothing yet");
@@ -241,6 +231,8 @@ static void test_stale_header_resync(void) {
   ok(f_dec_next(&d, &out) == 1, "it completes on the next read");
 }
 
+/* a single read can carry more than the buffer holds: the decoder has to accept what fits,
+ * say how much it took, and lose nothing */
 static void test_push_more_than_fits(void) {
   static u8 wire[F_MAX_FRAME * 3];
   static f_decoder d;
@@ -275,8 +267,8 @@ static void test_push_more_than_fits(void) {
   eq_int(seen, 40, "every frame survives a stream larger than the buffer");
   eq_int((long)d.dropped, 0, "and nothing is dropped doing it");
 
-  /* One enormous push of pure garbage must not wedge: it is dropped and the decoder
-   * recovers on the next real frame. */
+  /* one enormous push of pure garbage must not wedge: it is dropped and the decoder
+   * recovers on the next real frame */
   f_dec_init(&d);
   for (i = 0; i < (int)sizeof wire; i++) wire[i] = 0x39;
   p = wire;
@@ -304,8 +296,8 @@ static void test_fields(void) {
   u32 v;
 
   printf("fields\n");
-  /* Integer parsing is a length check in disguise, so overflow must be refused rather than
-   * wrapped. 4294967296 used to be accepted as a perfectly good zero. */
+  /* integer parsing is a length check, so overflow must be refused rather than wrapped:
+   * 4294967296 wraps to a valid-looking zero */
   {
     f_field f;
     u32 v = 12345;
@@ -317,7 +309,7 @@ static void test_fields(void) {
     ok(f_field_uint(&f, &v) == 1, "the largest u32 is still accepted");
     eq_int((long)v, 4294967295UL, "with the right value");
   }
-  /* Malformed lists decode to -1 rather than a guess. */
+  /* malformed lists decode to -1 rather than a guess */
   {
     u8 bad1[] = {3, 0, 0};       /* claims 3 fields, has 1 */
     u8 bad2[] = {1, 10, 0, 1, 2}; /* length past the end */
@@ -328,7 +320,7 @@ static void test_fields(void) {
     ok(f_fields(bad1, 0, fields, F_MAX_FIELDS) == -1, "empty");
   }
 
-  /* Integers are decimal or nothing. */
+  /* integers are decimal or nothing */
   {
     f_builder b;
     int n, count;
@@ -346,7 +338,6 @@ static void test_fields(void) {
     ok(!f_field_uint(&fields[3], &v), "empty is not a number");
   }
 
-  /* Truncating copy always terminates. */
   {
     f_builder b;
     char small[4];
@@ -362,7 +353,6 @@ static void test_fields(void) {
     ok(!f_field_eq(&fields[0], "EDITPLUS.EXE!"), "longer is not equal");
   }
 
-  /* A builder that overflows stays failed rather than writing a short frame. */
   {
     f_builder b;
     u8 tiny[8];

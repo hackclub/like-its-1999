@@ -1,8 +1,7 @@
-// A single toolbar button + <dialog> for the guest's one CD-ROM drive: mount a file
-// upload (reencoded via media-import.js — images and audio/MIDI mixed freely), a
-// preset disc, or (dev only) a raw .iso for testing. Styled to match
-// vmfs/filebrowser.js's dialog. See main.js for why set_cdrom()/eject_cdrom() need no
-// boot-time config, and why presets mount by URL while uploads mount as a buffer.
+// toolbar button + <dialog> for the guest's one CD-ROM drive: mount a file upload
+// (reencoded via media-import.js), a preset disc, or (dev only) a raw .iso. see
+// main.js for why set_cdrom()/eject_cdrom() need no boot-time config, and why presets
+// mount by URL while uploads mount as a buffer
 import { buildMediaCdrom } from './media-import.js'
 import { buildIso9660 } from './vmfs/iso9660.js'
 import { uniqueBaseName } from './iso-name.js'
@@ -33,7 +32,7 @@ function injectStyles() {
   document.head.appendChild(el)
 }
 
-// `presets`: [{ id, label, url, size }, ...]. `setStatus`: the toolbar status line.
+// `presets`: [{ id, label, url, size }, ...]. `setStatus`: the toolbar status line
 export function createCdromControl({
   emulator,
   presets = [],
@@ -45,10 +44,8 @@ export function createCdromControl({
   btn.type = 'button'
   let mounted = false
   let busy = false
-  // Grayed out until the guest is actually running — mounting a disc into a machine
-  // that's still booting is meaningless, and this keeps the button visibly present
-  // (rather than absent) throughout the load, matching the HTML placeholder it
-  // replaces so there's no flicker or layout shift.
+  // disabled rather than absent until the guest is running, matching the HTML
+  // placeholder it replaces so there's no flicker or layout shift
   let ready = false
   const renderBtn = () => {
     btn.textContent = mounted ? 'Eject CD' : 'Mount CD'
@@ -56,11 +53,9 @@ export function createCdromControl({
   }
   renderBtn()
 
-  // Enable once the guest is running. Also: a restored saved session can already have
-  // a disc in the drive before this control ever runs a mount() itself (see
-  // persist.js), so sync the label here too — "Mount CD" shouldn't lie about an
-  // already-inserted disc. Same internal-reach pattern as vmfs/blockdev.js's
-  // openLiveFs (there's no public V86 API for "is a disc currently in the drive").
+  // a restored session can already have a disc in the drive before this control runs
+  // a mount() itself (see persist.js), so sync the label here. no public V86 API for
+  // "is a disc in the drive", so reach the device directly as vmfs/blockdev.js does
   emulator.add_listener('emulator-started', () => {
     ready = true
     if (emulator.v86?.cpu?.devices?.cdrom?.has_disk?.()) mounted = true
@@ -108,8 +103,8 @@ export function createCdromControl({
     body.append(section)
   }
 
-  // import.meta.env.DEV is inlined + dead-code-eliminated by Vite in production —
-  // this whole section (and the listener behind it) never ships.
+  // Vite inlines and dead-code-eliminates import.meta.env.DEV, so this section and
+  // the listener behind it never ship
   if (import.meta.env.DEV) {
     const section = document.createElement('div')
     section.className = 'cdrom-section'
@@ -119,12 +114,10 @@ export function createCdromControl({
     body.append(section)
   }
 
-  // Dev-only escape hatch on "Upload files" above: skip the reencode entirely and
-  // put raw file bytes straight onto the disc, unsanitized — for testing against
-  // files that specifically shouldn't survive the real pipeline (e.g. verifying a
-  // renamed non-image actually gets rejected by the real path, by comparing against
-  // what raw passthrough does instead). import.meta.env.DEV strips this whole block,
-  // including buildRawCdrom, from production.
+  // dev-only escape hatch on "Upload files": skip the reencode and put raw file bytes
+  // on the disc unsanitized, for checking that files which shouldn't survive the real
+  // pipeline (a renamed non-image, say) are actually rejected by it. stripped from
+  // production along with buildRawCdrom
   let prepareFiles = (files) => buildMediaCdrom(files)
   if (import.meta.env.DEV) {
     const label = document.createElement('label')
@@ -161,10 +154,9 @@ export function createCdromControl({
   body.append(foot)
   const setMsg = (t) => (foot.querySelector('.msg').textContent = t || '')
 
-  // Controls that kick off a mount — disabled while one is in flight so a slow
-  // reencode can't be left to resolve in the background and clobber whatever gets
-  // mounted afterward. (Belt-and-suspenders: the generation counter below is what
-  // actually guarantees correctness even if one of these somehow fires anyway.)
+  // disabled while a mount is in flight so a slow reencode can't resolve in the
+  // background and clobber whatever was mounted after it; the generation counter
+  // below is what actually guarantees that if one of these fires anyway
   const mountControls = [
     $('[data-files]'),
     $('[data-mount-preset]'),
@@ -180,31 +172,26 @@ export function createCdromControl({
 
   $('[data-close]').addEventListener('click', () => dialog.close())
 
-  // Monotonic token identifying the "current" mount/eject action. A mount() only
-  // applies its result if it's still current when it finishes — otherwise a newer
-  // action (another mount, or an explicit eject) has already superseded it, and
-  // applying a stale result anyway is exactly the "closed the dialog on the files
-  // upload, mounted the preset instead, then the files upload finished late and
-  // silently overwrote it" bug this fixes.
+  // identifies the current mount/eject action, so a mount() only applies its result if
+  // nothing newer superseded it. applying a stale result is the "closed the dialog on
+  // the files upload, mounted the preset instead, then the files upload finished late
+  // and silently overwrote it" bug
   let generation = 0
 
-  // `prepare` does the slow, cancellable-in-effect part (reencoding, or just an
-  // arrayBuffer() read); `apply` does the actual emulator.set_cdrom() call, which is
-  // effectively instant for every caller below.
+  // `prepare` does the slow part (reencoding, or an arrayBuffer() read); `apply` does
+  // the emulator.set_cdrom() call, effectively instant for every caller below
   async function mount(prepare, apply, label) {
     const myGen = ++generation
     setBusy(true)
     setMsg(`mounting ${label}…`)
     try {
       const prepared = await prepare()
-      if (myGen !== generation) return // superseded — drop this result entirely
+      if (myGen !== generation) return // superseded, drop this result
 
-      // The guest is told about the swap via cdrom-atapi-fix.js: set_cdrom() sets
-      // v86's medium_changed flag, and the patched TEST UNIT READY turns that into
-      // the UNIT ATTENTION response Win98 actually reacts to. (The eject IRQ alone
-      // isn't it — Win98 ignores it and detects media purely by polling.) Ejecting
-      // first is kept as the physically honest sequence; it's a no-op if the
-      // drive's already empty and harmless otherwise.
+      // the guest learns about the swap via cdrom-atapi-fix.js: set_cdrom() sets v86's
+      // medium_changed, and the patched TEST UNIT READY turns that into the UNIT
+      // ATTENTION response Win98 reacts to. the eject IRQ alone does nothing, since
+      // Win98 ignores it and detects media purely by polling
       emulator.eject_cdrom()
       await apply(prepared)
       if (myGen !== generation) return // superseded mid-apply

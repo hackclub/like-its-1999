@@ -1,11 +1,8 @@
-/* Wire framing, the C half. The normative description is ../PROTOCOL.md and the other
- * implementation is ../frame.js; the two are pinned together by golden vectors
- * (fixtures/frames.bin) rather than by hope.
+/* wire framing, C half; ../PROTOCOL.md is normative and ../frame.js is the other
+ * implementation, pinned to this one by the golden vectors in fixtures/frames.bin
  *
- * Constraints this file lives under, because it runs in the parent, which must never
- * crash: no allocation, no CRT, no recursion, every buffer fixed and every length
- * checked. Nothing here can fail in a way a later valid frame cannot recover from.
- */
+ * runs in the parent, so: no allocation, no CRT, no recursion, fixed buffers, every
+ * length checked */
 #ifndef DAEMON_FRAME_H
 #define DAEMON_FRAME_H
 
@@ -16,7 +13,7 @@
 #define F_MAX_PAYLOAD 65536
 #define F_MAX_FRAME (F_HEADER + F_MAX_PAYLOAD + F_TRAILER)
 
-/* Frozen range: everything the parent implements. 0x20+ belongs to the child. */
+/* frozen range: what the parent implements; 0x20+ belongs to the child */
 #define F_RESET 0x01
 #define F_ANNOUNCE 0x02
 #define F_IDENT 0x03
@@ -35,11 +32,8 @@
 
 typedef unsigned char u8;
 typedef unsigned short u16;
-/* `unsigned int`, not `unsigned long`: long is 32 bits under mingw but 64 on a LP64 host,
- * and the whole point of building this for both is that the arithmetic matches. It did
- * not, once: the child stamped a 64-bit millisecond count into an 11-byte buffer, the
- * truncated value read back as an enormous age, and the parent killed a healthy child
- * every couple of hundred milliseconds. `unsigned int` is 32 bits on both targets. */
+/* `unsigned int`, not `unsigned long`: long is 32 bits under mingw and 64 on an LP64
+ * host, and the arithmetic has to match across both builds */
 typedef unsigned int u32;
 
 typedef struct {
@@ -55,7 +49,7 @@ typedef struct {
 
 u32 f_crc32(const u8 *b, int len);
 
-/* --- decoding ------------------------------------------------------------------ */
+/* --- decoding --- */
 
 typedef struct {
   u8 buf[F_MAX_FRAME];
@@ -65,45 +59,33 @@ typedef struct {
 } f_decoder;
 
 void f_dec_init(f_decoder *d);
-/* There is no f_dec_reset. RESET clears protocol state and deliberately leaves the byte
- * stream alone (the bytes still buffered arrived after it), and framing recovers from
- * garbage by itself, so nothing in the guest ever needs to discard the buffer. The JS
- * decoder keeps a reset() because the fake guest uses it to model a restart. */
+/* no f_dec_reset: RESET clears protocol state and leaves the byte stream alone, since
+ * the bytes still buffered arrived after it and framing resyncs on its own */
 
-/* Append bytes, returning how many were accepted, which may be fewer than offered: the
- * buffer holds one maximum frame and no more. Callers MUST loop, draining frames between
- * pushes, because a single read can easily carry more than one frame:
- *
- *   while (n > 0) {
- *     int took = f_dec_push(&d, p, n);
- *     p += took; n -= took;
- *     while (f_dec_next(&d, &frame)) handle(&frame);
- *   }
- *
- * Progress is always possible: if the buffer is full and yielded nothing, it cannot
- * contain a frame, so it is dropped and counted. (The JS decoder grows an array instead
- * and hides this; the C cannot, so the API says it out loud.) */
+/* Appends bytes and returns how many were accepted, which may be fewer than offered: the
+ * buffer holds one maximum frame. Callers must loop, draining frames between pushes,
+ * because one read can carry several. Progress is always possible: a full buffer that
+ * yielded nothing cannot contain a frame, so it is dropped and counted. */
 int f_dec_push(f_decoder *d, const u8 *b, int n);
-/* Extract the next whole frame. Returns 1 and fills `out`, or 0 when more bytes are
- * needed. `out->payload` is invalidated by the following push or next call. */
+/* Returns 1 and fills `out`, or 0 when more bytes are needed. `out->payload` is
+ * invalidated by the following push or next call. */
 int f_dec_next(f_decoder *d, f_frame *out);
 
-/* Split a payload into fields. Returns the count, or -1 if it is not a well-formed
- * field list (which means: drop the frame, never guess). */
+/* Splits a payload into fields. Returns the count, or -1 for a malformed field list,
+ * which means drop the frame rather than guess. */
 int f_fields(const u8 *payload, int len, f_field *out, int max);
 
-/* Field helpers. Comparisons and parsing are total: no errno, no locale, no CRT. */
+/* comparisons and parsing are total: no errno, no locale, no CRT */
 int f_field_eq(const f_field *f, const char *s);
-/* Copies at most cap-1 bytes and always terminates. */
+/* copies at most cap-1 bytes and always terminates */
 void f_field_str(const f_field *f, char *out, int cap);
-/* Decimal only. Returns 0 and leaves *out untouched if it is not a clean integer. */
+/* decimal only; returns 0 and leaves *out untouched if it is not a clean integer */
 int f_field_uint(const f_field *f, u32 *out);
 
-/* --- encoding ------------------------------------------------------------------ */
+/* --- encoding --- */
 
-/* Builds a field-list payload into a caller-supplied buffer. Every add is bounds
- * checked; once one overflows the builder stays failed and f_build_len returns -1,
- * so a caller can check once at the end rather than after every field. */
+/* Builds a field-list payload into a caller-supplied buffer. Once an add overflows the
+ * builder stays failed and f_build_len returns -1, so callers check once at the end. */
 typedef struct {
   u8 *buf;
   int cap;
@@ -118,7 +100,7 @@ void f_add_str(f_builder *b, const char *s);
 void f_add_uint(f_builder *b, u32 v);
 int f_build_len(f_builder *b); /* -1 if anything overflowed */
 
-/* Writes sync+header+payload+crc into `out`. Returns the byte count, or -1. */
+/* writes sync+header+payload+crc into `out`; returns the byte count, or -1 */
 int f_encode(u8 type, const u8 *payload, int len, u8 *out, int cap);
 
 #endif

@@ -1,13 +1,9 @@
-// Single "upload files" entry point for the CD-ROM modal (cdrom-ui.js). Each file is
-// routed to a reencode pipeline by its extension — image, audio/MIDI, or font. The
-// disc doesn't care what's on it, so there's no reason to make the user sort their
-// files into buckets before uploading.
+// single "upload files" entry point for the CD-ROM modal (cdrom-ui.js), routing each
+// file to a reencode pipeline by extension.
 //
-// Dispatching by extension only picks which pipeline to try: the real security
-// boundary is still the reencode inside each one (decode to pixels / samples / glyph
-// outlines and re-serialize — see the individual modules). So a file whose bytes don't
-// match its extension just fails to decode in whichever pipeline it was routed to, and
-// no original bytes ever reach the guest.
+// the extension only picks which pipeline to try; the security boundary is the reencode
+// inside each one (see the individual modules). a file whose bytes don't match its
+// extension fails to decode in whichever pipeline it was routed to
 import { buildIso9660 } from './vmfs/iso9660.js'
 import { uniqueBaseName } from './iso-name.js'
 import { reencodeImage } from './image-import.js'
@@ -35,8 +31,8 @@ function reencodeOne(file) {
   )
 }
 
-// Re-encode a list of File objects and pack them into an ISO9660 image ready for
-// emulator.set_cdrom({ buffer: ... }). Throws if any file can't be reencoded.
+// re-encode a list of File objects into an ISO9660 image ready for
+// emulator.set_cdrom({ buffer: ... }); throws if any file can't be reencoded
 export async function buildMediaCdrom(files) {
   const used = new Set()
   const entries = []

@@ -1,13 +1,11 @@
-/* The child: the part that does the work and is allowed to die.
+/* the child: the part that does the work and is allowed to die
  *
- * It talks only to the parent, over a pipe, and only in the daemon range (0x20+). It never
- * touches the port and never sends a frozen-range frame — the parent answers IDENT on its
- * behalf, because the parent is the one that knows which build it started.
+ * Talks only to the parent, over a pipe, and only in the daemon range (0x20+). It never
+ * touches the port and never sends a frozen-range frame; the parent answers IDENT on its
+ * behalf, since the parent knows which build it started.
  *
- * Being replaceable is the point. Everything risky lives here: enumerating windows,
- * running commands, whatever we add later. If it crashes, the parent restarts it and the
- * user never notices; if the parent crashed, only a Force Reboot would help.
- */
+ * Everything risky lives here (enumerating windows, running commands) because the parent
+ * restarts a child that crashes, while a dead parent needs a Force Reboot. */
 #include "plat.h"
 
 #define POLL_MS 1000
@@ -15,10 +13,9 @@
 #define IDLE_TICK_MS 100
 #define BUSY_FOR_MS 1000
 
-/* How often to stamp the liveness file. This must stay comfortably below the parent's
- * staleness threshold or a perfectly healthy child gets killed, so both are overridable
- * from the same environment and a test compresses them together. Production never sets
- * them: 5s of stamping against a 30s threshold. */
+/* How often to stamp the liveness file. Must stay well below the parent's staleness
+ * threshold or a healthy child gets killed, so both come from the environment and a test
+ * compresses them together; production is 5s of stamping against a 30s threshold. */
 #define DEF_ALIVE_EVERY_MS 5000
 static int ALIVE_EVERY_MS = DEF_ALIVE_EVERY_MS;
 #define MAX_TITLE 256
@@ -49,9 +46,8 @@ static void scopy(char *dst, const char *src, int cap) {
   dst[i] = 0;
 }
 
-/* Stamp the liveness file with the current tick. The parent compares it against its own
- * clock, which is how it tells a hang from a healthy idle: a hung process still has a
- * perfectly valid handle. */
+/* the parent compares this tick against its own clock to tell a hang from a healthy idle:
+ * a hung process still has a valid handle */
 static void alive_stamp(void) {
   char text[12];
   u32 v = p_ticks();
@@ -69,7 +65,7 @@ static void alive_stamp(void) {
   p_file_write(alive_path, (const u8 *)text, n);
 }
 
-/* Everything the child sends goes to the parent, which copies it out verbatim. */
+/* everything the child sends goes to the parent, which copies it out verbatim */
 static void send_frame(u8 type, f_builder *b) {
   int plen = f_build_len(b);
   int wlen;
@@ -78,8 +74,8 @@ static void send_frame(u8 type, f_builder *b) {
   if (wlen > 0) p_serial_write(out_frame, wlen);
 }
 
-/* The epoch is echoed from whatever the call carried: the child does not track it, since
- * the parent already drops anything from a stale page before it gets here. */
+/* the epoch is echoed from whatever the call carried; the parent already drops anything
+ * from a stale page before it reaches us */
 static void send_event(const char *epoch, const char *name, const char *a,
                        const char *b_) {
   f_builder b;
@@ -141,8 +137,8 @@ static void on_call(f_field *f, int n) {
     code = p_exec(cmd, out, (int)sizeof out);
     if (code == P_FAIL) {
       f_add_str(&b, "0");
-      /* p_exec leaves the reason in the buffer; it is the only place the guest's error
-       * code can reach anyone. */
+      /* p_exec leaves the reason in the buffer; it is the only way the guest's error code
+       * reaches anyone */
       f_add_str(&b, out[0] ? out : "could not run it");
     } else {
       f_add_str(&b, "1");
@@ -159,8 +155,7 @@ static void on_call(f_field *f, int n) {
 static void on_frame(const f_frame *fr) {
   f_field f[F_MAX_FIELDS];
   int n;
-  /* Only calls arrive here; the parent keeps the frozen range to itself. Anything else is
-   * from a future we do not know about, and is ignored rather than refused. */
+  /* only calls arrive here; the parent keeps the frozen range to itself */
   if (fr->type != F_CALL) return;
   n = f_fields(fr->payload, fr->len, f, F_MAX_FIELDS);
   if (n < 0) return;
@@ -205,7 +200,7 @@ int daemon_child_main(void) {
   for (;;) {
     int n = p_serial_read(in, (int)sizeof in);
     u32 now;
-    if (n == P_FAIL) return 0; /* the parent closed the pipe: it is stopping us */
+    if (n == P_FAIL) return 0; /* the parent closed the pipe, so it is stopping us */
     if (n > 0) {
       const u8 *p = in;
       int left = n;
@@ -217,7 +212,7 @@ int daemon_child_main(void) {
         p += took;
         left -= took;
         while (f_dec_next(&dec, &fr)) {
-          /* Remember the epoch from any call, so unsolicited events can be addressed. */
+          /* remember the epoch from any call, so unsolicited events can be addressed */
           f_field f[F_MAX_FIELDS];
           if (fr.type == F_CALL && f_fields(fr.payload, fr.len, f, F_MAX_FIELDS) >= 1)
             f_field_str(&f[0], epoch, (int)sizeof epoch);
@@ -227,8 +222,6 @@ int daemon_child_main(void) {
     }
 
     now = p_ticks();
-    /* The liveness file is what lets the parent tell a hang from a healthy idle: a hung
-     * process still has a valid handle. */
     if ((u32)(now - last_alive) >= (u32)ALIVE_EVERY_MS) {
       last_alive = now;
       alive_stamp();

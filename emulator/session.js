@@ -1,38 +1,27 @@
-// The decisions a session makes: what to boot from, whether a save may proceed, and
-// what an import would replace.
+// the decisions a session makes: what to boot from, whether a save may proceed, and what
+// an import would replace
 //
-// This exists as pure functions on purpose. Every bug in this feature so far has been
-// here — in the combinations of shared / fresh / nosave / unreadable-save / generation /
-// migrated / dev-versus-registered world — and none were reachable by a test while the
-// logic lived inside main.js, where it needed a DOM, an emulator and IndexedDB to run.
-// Two of them were introduced *by fixes* to the others, which is what happens when a
-// state machine can only be checked by clicking through it. Nothing in here touches the
-// DOM, storage or the emulator; main.js supplies facts and carries out the verdicts.
+// nothing here touches the DOM, storage or the emulator; main.js supplies the facts and
+// carries out the verdicts, which is what keeps these combinations testable
 
-// Where a session's initial RAM comes from.
+// where a session's initial RAM comes from
 //   'shared'   someone else's machine, fetched from ?share=
 //   'saved'    this browser's stored session for this world
 //   'snapshot' the world's shipped instant-boot snapshot
 //   'cold'     no RAM at all: boot the disks from the BIOS up
 export const BOOT_SOURCES = ['shared', 'saved', 'snapshot', 'cold']
 
-// Decide how to start.
-//
-// Inputs are all facts the caller has already gathered:
-//   params  { fresh, nosave, world, share } from readModeParams
-//   shared  the fetched shared machine, or null
+// inputs are facts the caller has already gathered:
 //   saved   what loadSavedSession returned: null, { save, state, gen, migrated },
 //           or { readOnly: true, reason }
-//   world   the resolved world (needs id, initialState, snapshotIsStale)
-//   otherDevSaves  true when some *other* dev world has a save, which is how a rebuilt
-//                  local image is distinguished from a first-ever visit
-//   storedElsewhere true when a machine IS stored for this world but we deliberately did
-//                  not read it (?fresh=1), so a save has something to destroy
-//   worldNote  a message from world resolution that should survive to the toolbar
+//   otherDevSaves  some other dev world has a save, which is how a rebuilt local image is
+//                  distinguished from a first-ever visit
+//   storedElsewhere a machine IS stored for this world but we deliberately did not read
+//                  it (?fresh=1), so a save has something to destroy
 //
-// Returns { source, prior, gen, blocked, note }. `gen` is the compare-and-swap claim
-// about the stored slot: a number means "I read this generation", 0 means "I believe
-// nothing is stored", and null means "don't check" (a deliberate overwrite).
+// `gen` in the returned plan is the compare-and-swap claim about the stored slot: a
+// number means "I read this generation", 0 means "I believe nothing is stored", and null
+// means "don't check" (a deliberate overwrite)
 export function planBoot({
   params = {},
   shared = null,
@@ -51,8 +40,8 @@ export function planBoot({
   }
 
   if (shared) {
-    // Not the user's session to keep. A save is only possible after an explicit
-    // confirmation, so it counts as deliberate and skips the generation check.
+    // not the user's session to keep; a save is only possible after an explicit
+    // confirmation, so it counts as deliberate and skips the generation check
     return {
       ...plan,
       source: 'shared',
@@ -65,15 +54,15 @@ export function planBoot({
   plan.note = worldNote
 
   if (params.fresh) {
-    // "Ignore what's stored and start clean", so a later save is meant to replace it, and
-    // checking a generation we never read would just refuse that write.
+    // ignoring what's stored means a later save is meant to replace it, so checking a
+    // generation we never read would only refuse that write
     //
-    // But replacing it has to be asked for. A URL parameter plus two minutes of autosave
-    // is not consent to destroy hours of someone's work, so when there IS a machine here
-    // the session starts blocked: autosaves decline silently, a Save click confirms and
-    // proceeds, and from then on it behaves normally.
-    // Both notes can apply at once (?fresh=1&world=bogus), and the world-resolution
-    // message is the one the user cannot otherwise discover, so it comes first.
+    // replacing it still has to be asked for: a URL parameter plus two minutes of
+    // autosave is not consent to destroy hours of someone's work, so when there IS a
+    // machine here the session starts blocked until a Save click confirms
+    //
+    // both notes can apply at once (?fresh=1&world=bogus), and the world-resolution
+    // message is the one the user cannot otherwise discover, so it comes first
     const freshNote = storedElsewhere
       ? 'fresh boot; the saved machine is untouched'
       : ''
@@ -89,10 +78,10 @@ export function planBoot({
   }
 
   if (saved?.readOnly) {
-    // A save we can't parse is still someone's machine. Boot around it and refuse to
-    // write, rather than treating it as absent and overwriting it on the next autosave.
-    // Phrased as a refusal, because it is shown as one: in the toolbar when a save
-    // declines, and in the confirm dialog when the user insists.
+    // a save we can't parse is still someone's machine: boot around it and refuse to
+    // write, rather than treating it as absent and overwriting it on the next autosave;
+    // phrased as a refusal because it is shown as one, in the toolbar and in the confirm
+    // dialog when the user insists
     plan.blocked = `this build cannot read the machine saved here (${saved.reason})`
     plan.note = 'existing save not readable — not overwriting it'
   } else if (saved) {
@@ -101,14 +90,13 @@ export function planBoot({
     plan.gen = saved.gen ?? 0
     if (saved.migrated) plan.note = 'restored a pre-container save'
   } else if (otherDevSaves) {
-    // Locally a world id is a fingerprint of the image bytes, so "nothing saved for this
-    // world" plus "something saved for another" means the image was rebuilt underneath.
+    // locally a world id is a fingerprint of the image bytes, so "nothing saved for this
+    // world" plus "something saved for another" means the image was rebuilt underneath
     plan.note = 'image changed — booting fresh'
   }
 
-  // Nothing to restore from: either no snapshot ships with this world, or the one that
-  // does is older than the disks beside it and would paint the previous build's RAM over
-  // the image you just rebuilt.
+  // a snapshot older than the disks beside it would paint the previous build's RAM over
+  // the image you just rebuilt
   if (plan.source === 'snapshot') {
     if (world.snapshotIsStale) {
       plan.source = 'cold'
@@ -120,18 +108,12 @@ export function planBoot({
   return plan
 }
 
-// Decide whether a save may proceed, and how.
-//
-//   params   { nosave } from readModeParams
 //   session  { gen, blocked } as maintained by applySave
-//   isShared whether this tab is viewing someone else's machine
 //   auto     true for the timer / visibility autosaves, false for a button press
 //   force    the user has been shown what they are replacing and said yes
-//   saving   a save is already in flight
 //
-// Returns { allowed, expectGen, withThumb, reason }. `reason` is a message worth showing
-// when a *deliberate* save is refused; an autosave that declines stays silent, because it
-// happens on a timer and the user did not ask for it.
+// `reason` is a message worth showing when a deliberate save is refused; an autosave that
+// declines stays silent, because it happens on a timer and the user did not ask for it
 export function planSave({
   params = {},
   session = {},
@@ -155,28 +137,25 @@ export function planSave({
   return {
     allowed: true,
     reason: null,
-    // Deliberate overwrites skip the check; everything else must match what it read.
-    // null and undefined are NOT the same here: null is "don't check" (fresh boot, shared
+    // null and undefined are not the same here: null is "don't check" (fresh boot, shared
     // machine), while a missing value means we never looked, which is a claim of "nothing
-    // is stored" and must be verified. Collapsing them with ?? re-broke ?fresh=1 saving.
+    // is stored" and must be verified; collapsing them with ?? re-broke ?fresh=1 saving
     expectGen: force ? null : session.gen === undefined ? 0 : session.gen,
-    // Never render and encode a thumbnail on an autosave: that path runs during page
-    // teardown, racing the tab closing, and the previous thumbnail carries forward
-    // untouched anyway.
+    // never render a thumbnail on an autosave: that path runs during page teardown,
+    // racing the tab closing, and the previous thumbnail carries forward untouched
     withThumb: !auto,
   }
 }
 
-// The session state a boot plan implies.
 export const sessionFrom = (plan) => ({
   prior: plan.prior,
   gen: plan.gen,
   blocked: plan.blocked,
 })
 
-// Fold a completed save back in. The file just written is what the next save must derive
-// from and the generation the next compare-and-swap expects; keep working from the
-// boot-time copy and later saves silently drop whatever only the stored one had.
+// the file just written is what the next save must derive from, and its generation is
+// what the next compare-and-swap expects; keep working from the boot-time copy and later
+// saves silently drop whatever only the stored one had
 export const applySave = (session, { save, gen }) => ({
   ...session,
   prior: save,
@@ -184,14 +163,8 @@ export const applySave = (session, { save, gen }) => ({
   blocked: null,
 })
 
-// Decide what to do with a file the user picked.
-//
-//   imported { world, needsReload, replaces } from readImport
-//   params   { nosave }
-//
-// Returns { needsConfirm, replaces, needsReload, refuse }. `refuse` is set when the file
-// cannot be applied at all: a machine for another world has to be stored before it can be
-// reloaded into, which ?nosave=1 forbids.
+// `refuse` is set when the file cannot be applied at all: a machine for another world has
+// to be stored before it can be reloaded into, which ?nosave=1 forbids
 export function planImport({ imported, params = {} } = {}) {
   if (!imported) throw new Error('planImport needs a read import')
   const { world, needsReload, replaces } = imported
@@ -204,11 +177,10 @@ export function planImport({ imported, params = {} } = {}) {
         `that machine belongs to ${world.label}, which needs saving to open — ` +
         'not possible with ?nosave=1',
     }
-  // A cross-world import is stored and then reloaded into with ?world=<id>, and only a
-  // registered (or freshly measured local) world can be resolved that way. A file naming
-  // some other world would be stored into a slot nothing could ever open again, so refuse
-  // it rather than appearing to work. A `?share=` link of the same file still opens, since
-  // that path carries the descriptor with it and never stores anything.
+  // a cross-world import is stored and then reloaded into with ?world=<id>, which only
+  // resolves for a registered (or freshly measured local) world; a file naming some other
+  // world would land in a slot nothing could ever open again. a `?share=` link of the
+  // same file still opens, since that path carries the descriptor and stores nothing
   if (needsReload && !world.resolvable)
     return {
       needsConfirm: false,
@@ -219,8 +191,8 @@ export function planImport({ imported, params = {} } = {}) {
         'not have. Open it with a ?share= link instead, or update the page.',
     }
   return {
-    // Importing replaces a stored machine unrecoverably, so ask first — and only when
-    // there is genuinely something to lose.
+    // importing replaces a stored machine unrecoverably, so ask first, and only when
+    // there is genuinely something to lose
     needsConfirm: !!replaces,
     replaces,
     needsReload,

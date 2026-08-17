@@ -1,8 +1,7 @@
 // node --test emulator/daemon/agent.test.mjs
 //
-// The host's connection state machine. The named tests are the hazards PROTOCOL.md commits
-// to surviving; the sweep at the end asserts the invariants hold for every ordering of
-// them, because that is where the save feature's bugs lived.
+// the host's connection state machine; the named tests are the hazards PROTOCOL.md
+// commits to surviving
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -29,7 +28,7 @@ import { TYPES, encodeFields, decodeFields, fieldText } from './frame.js'
 const WANT = 'abc123'
 const bytes = (n) => Uint8Array.from({ length: n }, (_, i) => i & 0xff)
 
-// Frames as they arrive from the wire: type plus an encoded field payload.
+// frames as they arrive from the wire: type plus an encoded field payload
 const inbound = (type, fields) => ({ type, payload: encodeFields(fields) })
 const ident = (epoch, role, hash, extra = {}) =>
   inbound(TYPES.IDENT, [
@@ -62,7 +61,6 @@ test('the first tick resets the stream and announces', () => {
   const r = onTick(a, 0)
   assert.deepEqual(sentTypes(r), [TYPES.RESET, TYPES.ANNOUNCE])
   assert.equal(a.state, 'looking')
-  // The announce carries the epoch and the hash we want, so a parent can answer both.
   assert.deepEqual(fieldsOf(r.sends[1]), ['e1', String(PROTO), WANT])
 })
 
@@ -75,7 +73,7 @@ test('announces on an interval, then concludes absence and slows down', () => {
   assert.equal(a.state, 'absent')
   assert.ok(gaveUp.events.some((e) => e.state === 'absent'))
 
-  // Absent is a quiet, healthy state: it keeps looking, just rarely.
+  // absent is a quiet, healthy state: it keeps looking, just rarely
   const t = ABSENT_AFTER_MS
   assert.deepEqual(sentTypes(onTick(a, t + 1000)), [])
   assert.deepEqual(sentTypes(onTick(a, t + SLOW_ANNOUNCE_MS)), [TYPES.ANNOUNCE])
@@ -101,8 +99,8 @@ test('a child already running the wanted build needs no push', () => {
 })
 
 test('a transfer is paced: one chunk out, then one per acknowledgement', () => {
-  // Not an optimisation. An unpaced push overran Windows' serial driver in the real guest
-  // and left it holding the port and deaf, so only one chunk is ever in flight.
+  // an unpaced push overran windows' serial driver and left it holding the port and
+  // deaf, so only one chunk is ever in flight
   const total = CHUNK_BYTES * 2 + 10
   const a = start({ wantBytes: bytes(total) })
   const r = onFrame(a, ident('e1', 'parent', ''), 100)
@@ -115,7 +113,6 @@ test('a transfer is paced: one chunk out, then one per acknowledgement', () => {
   )
   assert.equal(r.sends[1].fields[1], '0', 'starting at chunk zero')
 
-  // Each acknowledgement releases exactly one more chunk, in order, ending with END.
   const ack = (seq, at) =>
     onFrame(a, inbound(TYPES.STATUS, ['e1', 'payload-ack', String(seq)]), at)
 
@@ -131,7 +128,6 @@ test('a transfer is paced: one chunk out, then one per acknowledgement', () => {
   assert.deepEqual(sentTypes(r3), [TYPES.PAYLOAD_END])
   assert.equal(a.transfer, null, 'and the transfer is finished')
 
-  // A late duplicate acknowledgement does not push anything further.
   assert.deepEqual(sentTypes(ack(2, 500)), [])
 })
 
@@ -188,7 +184,6 @@ test('a failed push is not retried, and the old child keeps running', () => {
   assert.ok(
     r.events.some((e) => e.type === 'status' && e.code === 'push-failed')
   )
-  // Another IDENT must not start the same doomed transfer again.
   assert.deepEqual(
     sentTypes(onFrame(a, ident('e1', 'child', 'oldhash'), 300)),
     []
@@ -222,7 +217,7 @@ test('with no bytes to push, a parent-only machine simply stays unready', () => 
 // --- the snapshot hazards --------------------------------------------------------
 
 test('frames from another epoch are dropped', () => {
-  // A save restored mid-conversation: the queued tail belongs to a previous page.
+  // after a restore the queued tail on the wire belongs to a previous page
   const a = start()
   const r = onFrame(a, ident('OLD-EPOCH', 'child', WANT), 100)
   assert.equal(r.dropped, 'stale epoch')
@@ -360,14 +355,14 @@ test('no sequence of frames can leave the agent in a bad state', () => {
           now += 100
           const r = onFrame(a, make(), now)
           assert.ok(STATES.includes(a.state))
-          // Every send must be addressed to this epoch, or the guest will drop it.
+          // every send must be addressed to this epoch, or the guest drops it
           for (const s of r.sends)
             assert.equal(
               typeof s.fields[0] === 'string' ? s.fields[0] : 'e1',
               'e1',
               `send on ${a.state}`
             )
-          // Bytes are only ever offered once per hash.
+          // bytes are only ever offered once per hash
           assert.ok(a.pushedHash === null || a.pushedHash === a.wantHash)
         }
         onTick(a, now + 100)
@@ -392,20 +387,16 @@ test('a payload chunk always fits in a frame', () => {
 // --- losing the guest -------------------------------------------------------------
 
 test('a quiet connection is pinged, and a dead one is rediscovered', () => {
-  // Force Reboot restarts Windows without reloading the page, so a connected agent can be
-  // talking to a machine that no longer exists. Before this, it stayed "connected" forever
-  // and never announced again, and its belief that it had already pushed the child meant
-  // it would not have pushed to the replacement either.
+  // Force Reboot restarts windows without reloading the page, so a connected agent can
+  // be talking to a machine that no longer exists
   const a = start()
   onFrame(a, ident('e1', 'child', WANT), 1000)
   assert.equal(a.state, 'ready')
 
-  // Quiet but alive: it gets pinged rather than abandoned.
   assert.deepEqual(sentTypes(onTick(a, 1000 + IDLE_PING_MS - 1)), [])
   assert.deepEqual(sentTypes(onTick(a, 1000 + IDLE_PING_MS)), [TYPES.PING])
   assert.equal(a.state, 'ready')
 
-  // Still nothing after long enough: forget it and start looking again.
   const lost = onTick(a, 1000 + LOST_AFTER_MS)
   assert.equal(a.state, 'looking')
   assert.deepEqual(sentTypes(lost), [TYPES.RESET, TYPES.ANNOUNCE])
@@ -417,7 +408,6 @@ test('a quiet connection is pinged, and a dead one is rediscovered', () => {
     'including that it had pushed, so it pushes again'
   )
 
-  // A replacement guest is picked up and gets the binary.
   const r = onFrame(a, ident('e1', 'parent', ''), 1000 + LOST_AFTER_MS + 100)
   assert.ok(sentTypes(r).includes(TYPES.PAYLOAD_BEGIN))
 })
@@ -429,7 +419,7 @@ test('an answered ping keeps the connection alive indefinitely', () => {
   for (let i = 0; i < 20; i++) {
     t += IDLE_PING_MS
     const r = onTick(a, t)
-    // The guest answers every ping, so we never conclude it is gone.
+    // the guest answers every ping, so we never conclude it is gone
     if (r.sends.some((s) => s.type === TYPES.PING))
       onFrame(a, inbound(TYPES.PONG, ['e1', '1']), t + 5)
   }

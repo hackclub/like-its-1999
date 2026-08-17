@@ -1,6 +1,5 @@
-// Shared by image-import.js and audio-import.js: turn an arbitrary uploaded filename
-// into a unique 8-char base for the ISO writer's 8.3 names, so two uploads that only
-// differ past character 8 (or in case) don't collide.
+// turn an uploaded filename into a unique 8-char base for the ISO writer's 8.3 names,
+// so two uploads differing only past character 8 (or in case) don't collide
 export function uniqueBaseName(originalName, used) {
   const stem = originalName.replace(/\.[^.]*$/, '')
   let base =

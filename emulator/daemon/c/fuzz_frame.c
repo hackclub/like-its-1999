@@ -1,47 +1,36 @@
-/* Feed the guest's decoder arbitrary bytes and see whether it can be made to misbehave.
+/* feed the guest's decoder arbitrary bytes and see whether it can be made to misbehave
  *
  *   ./scripts/build-daemon.sh fuzz          (a few seconds, part of `npm run daemon`)
  *   ./scripts/build-daemon.sh fuzz 2000000  (a long run, when the framing changes)
  *
- * Randomised rather than coverage-guided: Apple's clang ships no libFuzzer, and installing
- * LLVM to get it was not worth a dependency for an input space this small and this
- * structured. The driver mutates real frames under ASAN, which finds the same class of bug
- * for this code. The libFuzzer entry point is kept below, so `clang -fsanitize=fuzzer` with a
- * brew LLVM works unchanged if coverage guidance is ever wanted.
+ * Randomised rather than coverage-guided: Apple's clang ships no libFuzzer, so the driver
+ * mutates real frames under ASAN instead. The libFuzzer entry point is kept below, so
+ * `clang -fsanitize=fuzzer` with a brew LLVM works unchanged. Every run is reproducible:
+ * the seed is printed, and passing it back replays exactly.
  *
- * Every run is reproducible: the seed is printed, and passing it back replays exactly.
- *
- * The parent's central claim is that no input can crash it, wedge it, or read outside its
- * own buffer. That was asserted in comments and by a set of hand-written hazards, which is
- * exactly the kind of claim that unit tests flatter: they cover the cases somebody thought
- * of. This covers the ones nobody did, with ASAN watching every access.
- *
- * It is worth more since the resynchronisation rule landed. "An incomplete candidate is only
- * honoured while nothing later proves to be a real frame" is a genuinely subtle thing to
- * have written by hand in two languages, and the invariants below are what it has to satisfy
- * no matter what arrives:
+ * The parent's claim is that no input can crash it, wedge it, or read outside its own
+ * buffer. The invariants it has to satisfy whatever arrives:
  *
  *   1. progress      pushing a non-empty buffer always accepts at least one byte, or the
- *                    decoder was already full and drops it — never zero forever
+ *                    decoder was already full and drops it; never zero forever
  *   2. containment   every frame handed out points inside the decoder's own buffer and
  *                    within its declared length
  *   3. no invention  a frame that comes out must have a correct CRC over its own bytes
  *   4. termination   draining always ends; no input makes f_dec_next loop
- *   5. field safety  f_fields on a hostile payload never points outside it
- */
+ *   5. field safety  f_fields on a hostile payload never points outside it */
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "frame.h"
 
-/* frame.c keeps its own little-endian reader static, so this has one too. */
+/* frame.c keeps its own little-endian reader static, so this has one too */
 static u32 rd32le(const u8 *p) {
   return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
 
-/* One decoder reused across a whole input, because state carried between pushes is where the
- * interesting bugs live: a stale candidate from one read interacting with the next. */
+/* one decoder reused across a whole input, because state carried between pushes is where
+ * the interesting bugs live: a stale candidate from one read meeting the next */
 static void feed(const unsigned char *data, size_t size) {
   f_decoder d;
   f_frame out;
@@ -50,9 +39,9 @@ static void feed(const unsigned char *data, size_t size) {
 
   f_dec_init(&d);
   while (at < size) {
-    /* The first byte of each round picks how much of the rest to hand over, so the fuzzer
-     * gets to choose the read boundaries. Those matter: a frame split across reads is the
-     * normal case and a stale header split across reads is the hazard. */
+    /* the first byte of each round picks how much of the rest to hand over, so the fuzzer
+     * chooses the read boundaries: a frame split across reads is the normal case and a
+     * stale header split across reads is the hazard */
     size_t want = (size_t)data[at] + 1;
     int took;
     at++;
@@ -60,7 +49,7 @@ static void feed(const unsigned char *data, size_t size) {
     if (want == 0) break;
 
     took = f_dec_push(&d, data + at, (int)want);
-    /* Invariant 1: progress. */
+    /* invariant 1: progress */
     if (took <= 0) {
       fprintf(stderr, "f_dec_push accepted %d of %zu bytes\n", took, want);
       __builtin_trap();
@@ -71,8 +60,8 @@ static void feed(const unsigned char *data, size_t size) {
     }
     at += (size_t)took;
 
-    /* Invariant 4: draining terminates. The bound is generous; the point is that it exists,
-     * because a decoder that yields the same frame forever would otherwise hang here. */
+    /* invariant 4: draining terminates; the bound is generous, but without it a decoder
+     * that yielded the same frame forever would hang here */
     guard = 0;
     while (f_dec_next(&d, &out)) {
       u32 crc;
@@ -80,7 +69,7 @@ static void feed(const unsigned char *data, size_t size) {
         fprintf(stderr, "f_dec_next kept yielding frames\n");
         __builtin_trap();
       }
-      /* Invariant 2: containment. */
+      /* invariant 2: containment */
       if (out.len < 0 || out.len > F_MAX_PAYLOAD) {
         fprintf(stderr, "frame length %d out of range\n", out.len);
         __builtin_trap();
@@ -89,15 +78,15 @@ static void feed(const unsigned char *data, size_t size) {
         fprintf(stderr, "frame payload points outside the decoder buffer\n");
         __builtin_trap();
       }
-      /* Invariant 3: no invention. The CRC covers type, flags, length and payload, which
-       * sit immediately before the payload we were handed. */
+      /* invariant 3: no invention; the CRC covers type, flags, length and payload, which
+       * sit immediately before the payload we were handed */
       crc = f_crc32(out.payload - (F_HEADER - 2), F_HEADER - 2 + out.len);
       if (crc != rd32le(out.payload + out.len)) {
         fprintf(stderr, "a frame came out with a bad CRC\n");
         __builtin_trap();
       }
 
-      /* Invariant 5: fields. A payload is attacker-shaped even inside a valid frame. */
+      /* invariant 5: fields; a payload is attacker-shaped even inside a valid frame */
       {
         f_field fields[F_MAX_FIELDS];
         int n = f_fields(out.payload, out.len, fields, F_MAX_FIELDS);
@@ -108,8 +97,8 @@ static void feed(const unsigned char *data, size_t size) {
             fprintf(stderr, "a field points outside its payload\n");
             __builtin_trap();
           }
-          /* Exercise the accessors on whatever it found: these run on real input in the
-           * guest and must be total. */
+          /* exercise the accessors on whatever it found: these run on real input in the
+           * guest and must be total */
           {
             char text[64];
             u32 v = 0;
@@ -131,12 +120,12 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size) {
 
 #ifndef FUZZ_LIBFUZZER
 
-/* --- the standalone driver ------------------------------------------------------- */
+/* --- the standalone driver --- */
 
 #include <stdlib.h>
 #include <time.h>
 
-/* xorshift64*, so a seed reproduces a run exactly on any machine. */
+/* xorshift64*, so a seed reproduces a run exactly on any machine */
 static unsigned long long g_state;
 static u32 rnd(void) {
   g_state ^= g_state >> 12;
@@ -147,8 +136,8 @@ static u32 rnd(void) {
 
 #define CASE_MAX 4096
 
-/* A believable frame, so the interesting mutations start from something the decoder accepts
- * rather than from noise it rejects in the first two bytes. */
+/* a believable frame, so mutations start from something the decoder accepts rather than
+ * from noise it rejects in the first two bytes */
 static int seed_frame(u8 *out, int cap) {
   u8 payload[256];
   f_builder b;
@@ -172,16 +161,16 @@ static int build_case(u8 *buf, int cap) {
   int frames = (int)(rnd() % 4);
   int i;
 
-  /* A read-size byte, then some frames, then damage. The read-size bytes are what feed()
-   * uses to choose its boundaries. */
+  /* a read-size byte, then some frames, then damage; feed() chooses its boundaries from
+   * the read-size bytes */
   buf[n++] = (u8)(rnd() & 0xff);
   for (i = 0; i <= frames && n < cap - 32; i++) {
     int wrote = seed_frame(buf + n, cap - n);
     if (wrote > 0) n += wrote;
     if (n < cap) buf[n++] = (u8)(rnd() & 0xff);
   }
-  /* Garbage tail, sometimes: a truncated frame, a lone sync word, a plausible header with a
-   * length that will never arrive. That last one is the restore hazard. */
+  /* garbage tail, sometimes: a lone sync word, or a plausible header with a length that
+   * will never arrive, which is the restore hazard */
   switch (rnd() % 4) {
     case 0:
       if (n < cap - 2) {
@@ -204,8 +193,7 @@ static int build_case(u8 *buf, int cap) {
     default:
       break;
   }
-  /* Now corrupt it: bit flips, truncation, and byte swaps, which is what a UART full of a
-   * previous session's bytes actually looks like. */
+  /* now corrupt it, the way a UART still full of a previous session's bytes looks */
   {
     int flips = (int)(rnd() % 8);
     for (i = 0; i < flips && n > 0; i++) buf[rnd() % (u32)n] ^= (u8)(1 << (rnd() % 8));

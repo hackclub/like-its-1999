@@ -1,32 +1,23 @@
-// A minimal, reusable <dialog> file browser for one or more FatFs disks (see
-// fat.js). Navigate directories, switch disks, and download entries — folders as a
-// ZIP, files directly. It's decoupled from where the bytes come from — hand it any
-// FatFs. `openLiveFs` builds one over a running v86 emulator (the efficient path:
-// reads merge guest writes and reuse the VM's chunk cache).
+// <dialog> file browser over one or more FatFs disks (fat.js), taking any FatFs
+// whatever its byte source; openLiveFs builds one over a running v86 emulator
 //
-//   import { createFileBrowser, openLiveFs } from './vmfs/filebrowser.js'
-//   const browser = createFileBrowser({
+//   createFileBrowser({
 //     disks: [
 //       { label: 'C:\\', fs: () => openLiveFs(emulator, 'hda') },
 //       { label: 'D:\\', fs: () => openLiveFs(emulator, 'hdb') },
 //     ],
 //   })
-//   button.onclick = () => browser.open('/')
 //
-// A `fs` can be a FatFs or a `() => Promise<FatFs>` thunk (resolved lazily on first
-// use, then cached). Single-disk shorthand: `createFileBrowser({ fs, title })`.
-//
-// The download action is injectable via `onDownload(path, isDir, fs)` — it defaults
-// to a ZIP (dirs) / direct file download, but a host can swap in "attach to a
-// submission" etc.
+// a disk's `fs` may be a FatFs or a `() => Promise<FatFs>` thunk, resolved on first
+// use and cached; `createFileBrowser({ fs, title })` is the single-disk shorthand.
+// `onDownload(path, isDir, fs)` replaces the default zip/file download, e.g. with
+// "attach to a submission"
 
 import { FatFs } from './fat.js'
 import { v86Device } from './blockdev.js'
 import { exportDirZip } from './extract.js'
 
-// Build a FatFs over a live emulator's disk (default C: / hda). v86 exposes the disk
-// backends as the master/slave of each IDE channel: hda=primary.master (C:),
-// hdb=primary.slave (D:).
+// v86 exposes disk backends as the master/slave of each ide channel; hda is C:, hdb D:
 export async function openLiveFs(emulator, disk = 'hda') {
   const ide = emulator?.v86?.cpu?.devices?.ide
   const iface = {
@@ -49,13 +40,11 @@ function triggerDownload(bytes, name, type) {
   URL.revokeObjectURL(a.href)
 }
 
-// Download a directory as a ZIP in the browser.
 export async function downloadDirZip(fs, path) {
   const bytes = await exportDirZip(fs, path)
   triggerDownload(bytes, (basename(path) || 'disk') + '.zip', 'application/zip')
 }
 
-// Download a single file's bytes in the browser.
 export async function downloadFile(fs, path) {
   const bytes = await fs.readFile(path)
   triggerDownload(bytes, basename(path) || 'file', 'application/octet-stream')
@@ -106,7 +95,6 @@ export function createFileBrowser({
 } = {}) {
   injectStyles()
   const list0 = disks || [{ label: title, fs }]
-  // Normalise each disk's fs into a lazily-resolved, cached getter.
   const diskList = list0.map((d) => {
     let resolved = null
     return {
@@ -147,11 +135,10 @@ export function createFileBrowser({
 
   let activeIdx = 0
   let current = '/'
-  let fsCache = null // resolved FatFs for the active disk
+  let fsCache = null
   const setMsg = (t) => (msg.textContent = t || '')
   const diskLabel = () => diskList[activeIdx].label
 
-  // Header: a disk <select> when there's more than one disk, else a plain label.
   function renderHead() {
     head.replaceChildren()
     if (diskList.length > 1) {
@@ -206,7 +193,6 @@ export function createFileBrowser({
     }
   }
 
-  // A per-row download button (folders → zip, files → the file itself).
   function makeDownloadButton(path, isDir) {
     const btn = document.createElement('button')
     btn.className = 'action dl'

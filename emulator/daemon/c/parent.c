@@ -1,19 +1,14 @@
-/* The parent: owns the port, speaks the frozen range, supervises the child.
+/* the parent: owns the port, speaks the frozen range, supervises the child
  *
- * This is the binary baked into the disk image, and it is the one thing here that must
- * never crash. Reloading the page restores saved RAM rather than re-running Windows
- * startup, so a parent that died before a save is dead in every restore of that save and
- * only a Force Reboot brings it back. A child that dies is invisible, because this
- * restarts it.
+ * This is the binary baked into the disk image and the one thing here that must never
+ * crash: reloading the page restores saved RAM rather than re-running Windows startup, so
+ * a parent that died before a save is dead in every restore of it and only a Force Reboot
+ * brings it back. Hence fixed buffers, no allocation, no recursion, no CRT, every length
+ * checked, and every unknown thing ignored rather than treated as an error.
  *
- * Consequences, all deliberate: fixed buffers, no allocation, no recursion, no CRT. Every
- * length is checked, every unknown thing is ignored rather than treated as an error, and
- * no input can put it in a state a later valid frame cannot recover from.
- *
- * It parses frame headers and the frozen range only. Types 0x20 and up are copied to the
- * child's pipe without being looked at, which is what lets the protocol above it grow
- * without ever touching this binary. See ../PROTOCOL.md.
- */
+ * It parses frame headers and the frozen range only; types 0x20 and up are copied to the
+ * child's pipe unexamined, so the protocol above can grow without touching this binary.
+ * See ../PROTOCOL.md. */
 #include "plat.h"
 
 #define VER "0.1"
@@ -23,26 +18,22 @@
 #define MAX_HASH 72
 #define MAX_PATH_LEN 200
 
-/* Supervision. The grace period matters: a child that has just started has not had a
- * chance to touch its liveness file yet, and killing it for that would be a loop.
- *
- * These are read from the environment at startup so tests can compress them; nothing sets
- * them in production. Without that, the hang-detection path would need a real 30-second
- * wait to exercise, which means it would never be exercised. */
+/* The grace period matters: a child that has just started has not touched its liveness
+ * file yet, and killing it for that would loop. All read from the environment at startup
+ * so tests can compress them; nothing sets them in production. */
 #define DEF_ALIVE_STALE_MS 30000
 #define DEF_SPAWN_GRACE_MS 15000
 #define DEF_BACKOFF_START_MS 1000
 #define DEF_SUPERVISE_EVERY_MS 1000
 #define BACKOFF_MAX_MS 60000
 #define MAX_FAILS 5
-/* How long after a spawn to confirm the child is still there. Long enough to catch a
- * binary that cannot run at all, short enough that nobody notices. */
+/* how long after a spawn to confirm the child is still there: long enough to catch a
+ * binary that cannot run at all, short enough that nobody notices */
 #define DEF_SPAWN_CONFIRM_MS 80
 
-/* Poll fast while a conversation is happening, slowly when nothing is. A push arrives as
- * a burst, so only its first frame ever waits for the slow tick; everything after keeps
- * the loop hot. The difference is 50 wakeups a second against 10, all day, in a program
- * that runs for as long as the tab is open. */
+/* Poll fast during a conversation, slowly otherwise. A push arrives as a burst, so only
+ * its first frame waits for the slow tick, and the difference is 50 wakeups a second
+ * against 10 for as long as the tab is open. */
 #define TICK_MS 20
 #define IDLE_TICK_MS 100
 #define BUSY_FOR_MS 1000
@@ -57,7 +48,7 @@ typedef struct {
   char epoch[MAX_EPOCH];
   int have_epoch;
 
-  /* An in-flight payload push. */
+  /* an in-flight payload push */
   int xfer;
   char xfer_hash[MAX_HASH];
   u32 xfer_len, xfer_got, xfer_next_seq;
@@ -77,7 +68,7 @@ typedef struct {
 
 static parent P;
 
-/* The payload lands here before it becomes a file. One max-size child, no allocation. */
+/* the payload lands here before it becomes a file: one max-size child, no allocation */
 #define MAX_CHILD_BYTES (512 * 1024)
 static u8 xfer_buf[MAX_CHILD_BYTES];
 
@@ -85,7 +76,7 @@ static u8 out_frame[F_MAX_FRAME];
 static u8 out_payload[F_MAX_PAYLOAD];
 static f_decoder dec;
 
-/* --- small string helpers (no CRT) ----------------------------------------------- */
+/* --- small string helpers (no CRT) --- */
 
 static int slen(const char *s) {
   int n = 0;
@@ -134,11 +125,11 @@ static void path_join(char *out, int cap, const char *a, const char *b) {
   out[n] = 0;
 }
 
-/* --- sending --------------------------------------------------------------------- */
+/* --- sending --- */
 
-/* A frame we could not build or encode is a reply somebody is waiting for, and the host can
- * only see it as silence. It cannot be reported through send_frame itself for obvious
- * reasons, so it is counted and the next status carries the tally out. */
+/* A frame we could not build or encode is a reply somebody is waiting for, and the host
+ * sees it only as silence. It cannot be reported through send_frame itself, so it is
+ * counted and the next status carries the tally. */
 static u32 g_dropped_out;
 
 static void send_frame(u8 type, f_builder *b) {
@@ -173,16 +164,16 @@ static void send_status(const char *code, const char *detail) {
   f_add_str(&b, P.epoch);
   f_add_str(&b, code);
   f_add_str(&b, detail);
-  /* Frames we failed to send, which the host would otherwise only experience as a call that
-   * never came back. Zero in normal operation. */
+  /* frames we failed to send, which the host would otherwise see as a call that never
+   * came back; zero in normal operation */
   f_add_uint(&b, g_dropped_out);
   send_frame(F_STATUS, &b);
 }
 
-/* --- the child ------------------------------------------------------------------- */
+/* --- the child --- */
 
-/* CACHE\<hash>.EXE. The extension is not decoration: CreateProcess on 9x wants one, and
- * a hash-named file without it would simply refuse to start. */
+/* CACHE\<hash>.EXE; CreateProcess on 9x wants the extension and refuses to start a
+ * hash-named file without it */
 static void cache_path(char *out, int cap, const char *hash) {
   char dir[MAX_PATH_LEN];
   char name[MAX_HASH + 8];
@@ -197,10 +188,8 @@ static void cache_path(char *out, int cap, const char *hash) {
   path_join(out, cap, dir, name);
 }
 
-/* A hash becomes a filename, so it is checked rather than trusted: letters and digits
- * only, which leaves no way to spell a separator, a drive or a parent directory. This
- * closes nothing the host could not already do by pushing whatever bytes it likes, but a
- * field off the wire should never be able to name a path regardless. */
+/* a hash becomes a filename, so letters and digits only: nothing off the wire gets to
+ * spell a separator, a drive, or a parent directory */
 static int hash_ok(const char *h) {
   int i = 0;
   for (; h[i]; i++) {
@@ -218,15 +207,15 @@ static void stop_child(void) {
   P.child_hash[0] = 0;
 }
 
-/* Liveness is a tick count in a file rather than its modification time: both sides read
- * the same clock, and it avoids 64-bit FILETIME arithmetic in a binary with no runtime. */
+/* liveness is a tick count in a file rather than its modification time: both sides read
+ * the same clock, and it avoids 64-bit FILETIME arithmetic in a binary with no runtime */
 static void alive_stamp(void) {
   char text[12];
   int n = utoa32(p_ticks(), text);
   p_file_write(P.alive_path, (const u8 *)text, n);
 }
 
-/* Milliseconds since the child last stamped, or -1 if it never has. */
+/* milliseconds since the child last stamped, or -1 if it never has */
 static long alive_age(void) {
   u8 buf[16];
   u32 v = 0;
@@ -240,8 +229,8 @@ static long alive_age(void) {
   return (long)(u32)(p_ticks() - v);
 }
 
-/* Try to start the cached binary. Reports through STATUS either way, because silence is
- * indistinguishable from a wedge from the host's side. */
+/* Tries to start the cached binary, reporting through STATUS either way: from the host's
+ * side silence is indistinguishable from a wedge. */
 static void try_spawn(void) {
   char path[MAX_PATH_LEN];
   if (P.child.running || !P.cached_hash[0]) return;
@@ -249,20 +238,17 @@ static void try_spawn(void) {
 
   cache_path(path, (int)sizeof path, P.cached_hash);
   if (!p_file_exists(path)) {
-    /* Cached a moment ago and gone now: a disk error, or somebody tidying C:\1999. Saying
-     * so is what turns "tracking stopped" into something diagnosable, and it invites the
-     * host to push again. */
+    /* cached a moment ago and gone now: a disk error, or somebody tidying C:\1999; saying
+     * so invites the host to push again */
     P.cached_hash[0] = 0;
     send_status("child-down", "cached binary has vanished");
     send_ident();
     return;
   }
   if (p_child_spawn(&P.child, path, 0) == P_OK) {
-    /* "Started" has to mean "still there a moment later". Creating a process succeeds for
-     * plenty of binaries that cannot run: on POSIX the fork always works and the exec
-     * failure surfaces as an immediate exit, and on 9x a PE that loads but is missing an
-     * import dies just as fast. Without this check a push of a broken build reported
-     * success, and on_payload_end would then delete the child that actually worked. */
+    /* "started" has to mean "still there a moment later": on POSIX the fork always works
+     * and an exec failure shows up as an immediate exit, and on 9x a PE that loads with a
+     * missing import dies just as fast */
     p_sleep(SPAWN_CONFIRM_MS);
     if (!p_child_alive(&P.child)) P.child_hash[0] = 0;
   }
@@ -282,13 +268,12 @@ static void try_spawn(void) {
   send_ident();
 }
 
-/* The host announces which build it wants on every page load, and the cache usually
- * already holds it: the same page reloaded, or a guest rebooted under a page that has not
- * changed. Spawning it here means the common case transfers nothing at all, instead of
- * re-pushing tens of kilobytes through a 512-byte acked window every single boot.
+/* The host announces which build it wants on every page load and the cache usually holds
+ * it already, so spawning from here means the common case transfers nothing instead of
+ * re-pushing tens of kilobytes through a 512-byte acked window every boot.
  *
- * Nothing is retried here. If the spawn fails, supervise() owns the backoff, and a hash
- * we are already trying is left alone so a burst of announces cannot restart it. */
+ * Nothing is retried here: supervise() owns the backoff, and a hash we are already trying
+ * is left alone so a burst of announces cannot restart it. */
 static void adopt_cached(f_field *want) {
   char hash[MAX_HASH];
   char path[MAX_PATH_LEN];
@@ -298,10 +283,9 @@ static void adopt_cached(f_field *want) {
     send_status("adopt-skipped", "the announced hash is not a usable name");
     return;
   }
-  /* These two are not failures and must stay quiet: the first is the steady state (we are
-   * already running or already trying that build) and the second is the ordinary "we have
-   * never seen this build" that the push exists to fix. Announces arrive every two seconds,
-   * so a status here would be a stream of noise rather than information. */
+  /* Neither of these is a failure and both must stay quiet: the first is the steady state
+   * and the second is the ordinary unseen build that the push exists to fix. Announces
+   * arrive every two seconds, so a status here would be a stream of noise. */
   if (seq(hash, P.cached_hash)) return;
   cache_path(path, (int)sizeof path, hash);
   if (!p_file_exists(path)) return;
@@ -314,8 +298,8 @@ static void adopt_cached(f_field *want) {
   try_spawn();
 }
 
-/* Death and hangs are different failures and only one of them is visible in a process
- * handle, so both are checked. */
+/* death and hangs are different failures and only death is visible in a process handle,
+ * so both are checked */
 static void supervise(void) {
   u32 now = p_ticks();
 
@@ -326,8 +310,7 @@ static void supervise(void) {
     if (P.backoff > BACKOFF_MAX_MS) P.backoff = BACKOFF_MAX_MS;
     P.next_spawn = now + (u32)P.backoff;
     send_status(P.fails >= MAX_FAILS ? "child-failed" : "child-down", "exited");
-    /* Re-identify: the host learns there is something to do, and pushes a replacement if
-     * we have nothing cached to run. */
+    /* re-identify, so the host pushes a replacement if we have nothing cached to run */
     send_ident();
     return;
   }
@@ -335,7 +318,7 @@ static void supervise(void) {
   if (P.child.running && (u32)(now - P.child_started) > (u32)SPAWN_GRACE_MS) {
     long age = alive_age();
     if (age < 0 || age > ALIVE_STALE_MS) {
-      /* Alive as a process but not as a program: a process handle cannot see this. */
+      /* alive as a process but not as a program, which a process handle cannot see */
       stop_child();
       P.fails++;
       P.next_spawn = now + BACKOFF_START_MS;
@@ -349,7 +332,7 @@ static void supervise(void) {
     try_spawn();
 }
 
-/* --- payload transfer ------------------------------------------------------------- */
+/* --- payload transfer --- */
 
 static void ack_chunk(u32 seq_no) {
   f_builder b;
@@ -370,7 +353,7 @@ static void xfer_abort(void) {
 
 static void on_payload_begin(f_field *f, int n) {
   u32 len = 0;
-  /* Always restart from scratch: a BEGIN discards whatever was in flight. */
+  /* a BEGIN discards whatever was in flight */
   xfer_abort();
   if (n < 3 || !f_field_uint(&f[2], &len) || len == 0 || len > MAX_CHILD_BYTES) {
     send_status("push-failed", "bad length");
@@ -386,14 +369,12 @@ static void on_payload_begin(f_field *f, int n) {
   P.xfer_len = len;
 }
 
-/* Acknowledge every chunk, and let the host wait for it before sending the next.
+/* Acknowledge every chunk and let the host wait for it before sending the next.
  *
- * This is the one place the protocol needs real flow control, and the reason is a layer
- * below us. The emulated UART cannot drop bytes, which is what made an unpaced push look
- * safe on paper, but Windows' serial driver sits behind it with a buffer measured in
- * kilobytes, and a host write arrives as fast as the guest can take interrupts. A 21 KB
- * binary sent in one go overran it and left the port deaf. One chunk in flight at a time
- * removes the race rather than guessing at a safe rate. */
+ * The emulated UART cannot drop bytes, but Windows' serial driver behind it has a buffer
+ * measured in kilobytes and a host write arrives as fast as the guest can take
+ * interrupts: a 21 KB binary sent in one go overran it and left the port deaf. One chunk
+ * in flight removes the race rather than guessing at a safe rate. */
 static void on_payload_data(f_field *f, int n) {
   u32 seq_no = 0;
   if (!P.xfer || n < 3) return; /* a stray DATA without a BEGIN is dropped */
@@ -402,8 +383,8 @@ static void on_payload_data(f_field *f, int n) {
     return;
   }
   if (seq_no + 1 == P.xfer_next_seq) {
-    /* A repeat of the chunk we already have: the ack went missing, so send another and
-     * keep the transfer moving rather than deadlocking on it. */
+    /* a repeat of the chunk we already have, so the ack went missing: send another rather
+     * than deadlock on it */
     ack_chunk(seq_no);
     return;
   }
@@ -424,10 +405,9 @@ static void on_payload_data(f_field *f, int n) {
   ack_chunk(seq_no);
 }
 
-/* Integrity here is the per-frame CRC plus the declared length and contiguous sequence
- * numbers. The hash is an identity label rather than a checksum: computing sha256 in a
- * freestanding parent would be a hundred lines guarding against a corruption the CRC has
- * already excluded, over a transport that cannot drop bytes. */
+/* Integrity is the per-frame CRC plus the declared length and contiguous sequence
+ * numbers. The hash is an identity label rather than a checksum: sha256 in a freestanding
+ * parent would guard against corruption the CRC has already excluded. */
 static void on_payload_end(f_field *f, int n) {
   char path[MAX_PATH_LEN];
   char dir[MAX_PATH_LEN];
@@ -444,10 +424,9 @@ static void on_payload_end(f_field *f, int n) {
     return;
   }
 
-  /* Already running exactly these bytes: keep the child. The host pushes again after a
-   * `child-down` because it cannot know the parent has the binary cached and is retrying,
-   * so the two can cross; without this the redundant push would kill a child that had just
-   * come back, and the write would fail anyway because Windows locks a running executable. */
+  /* Already running exactly these bytes, so keep the child. The host pushes again after a
+   * `child-down` without knowing we have the binary cached and are retrying, so the two
+   * cross; the write would fail anyway, since Windows locks a running executable. */
   if (P.child.running && seq(P.xfer_hash, P.child_hash)) {
     send_status("push-ignored", "already running it");
     xfer_abort();
@@ -464,12 +443,9 @@ static void on_payload_end(f_field *f, int n) {
     return;
   }
 
-  /* Swap children without burning the bridge.
-   *
-   * The previous binary stays on disk until the new one has actually started, because a
-   * push that transfers perfectly can still fail to spawn, and PROTOCOL.md promises that a
-   * failed push leaves the machine with whatever child it already had. Deleting first meant
-   * a bad build cost all tracking until the next page load. */
+  /* The previous binary stays on disk until the new one has started: a push that
+   * transfers perfectly can still fail to spawn, and PROTOCOL.md promises a failed push
+   * leaves the machine with whatever child it already had. */
   {
     char previous[MAX_HASH];
     scopy(previous, P.cached_hash, MAX_HASH);
@@ -483,17 +459,15 @@ static void on_payload_end(f_field *f, int n) {
     try_spawn();
 
     if (P.child.running) {
-      /* It works, so the one it replaces goes: a long run of dev pushes would otherwise
-       * fill the disk with every build that ever ran. After the spawn, because Windows
-       * will not delete a running executable. */
+      /* it works, so drop the one it replaces; after the spawn, because Windows will not
+       * delete a running executable */
       if (previous[0] && !seq(previous, P.child_hash)) {
         char old[MAX_PATH_LEN];
         cache_path(old, (int)sizeof old, previous);
         p_file_delete(old);
       }
     } else if (previous[0] && !seq(previous, P.cached_hash)) {
-      /* Roll back to the child we know starts. try_spawn has already reported the failure;
-       * this says what we did about it. */
+      /* roll back to the child we know starts; try_spawn already reported the failure */
       scopy(P.cached_hash, previous, MAX_HASH);
       P.fails = 0;
       P.backoff = 0;
@@ -504,23 +478,21 @@ static void on_payload_end(f_field *f, int n) {
   }
 }
 
-/* --- frames from the host ---------------------------------------------------------- */
+/* --- frames from the host --- */
 
-/* Hand a frame to the child, and treat a child that will not take it as wedged.
+/* Hands a frame to the child and treats a child that will not take it as wedged.
  *
- * This is the one place the parent writes into something it does not control. A child that
- * has stopped reading fills the pipe, and a blocking write there would park the process
- * that must never stop, unable to read COM1 or to kill the child that wedged it. Two
- * independent guards: the write end is non-blocking with a deadline (p_child_write), and a
- * child whose liveness file has gone stale is not written to at all, on the grounds that
- * something we are about to kill has no business receiving work. */
+ * A child that has stopped reading fills the pipe, and a blocking write would park the
+ * process that also has to read COM1 and kill that child. Two guards: the write end is
+ * non-blocking with a deadline (p_child_write), and a child whose liveness file has gone
+ * stale is not written to at all. */
 static void forward_to_child(const f_frame *fr) {
   int wlen;
   if (!P.child.running) return; /* nothing to forward to; the host knows we are not ready */
 
   if (!P.child.nonblocking) {
-    /* The platform would not give us a non-blocking pipe, so the liveness file is the only
-     * thing standing between us and an unbounded write. Trust it strictly. */
+    /* no non-blocking pipe from the platform, so the liveness file is all that stands
+     * between us and an unbounded write */
     long age = alive_age();
     if (age < 0 || age > ALIVE_STALE_MS) {
       stop_child();
@@ -533,9 +505,8 @@ static void forward_to_child(const f_frame *fr) {
   wlen = f_encode(fr->type, fr->payload, fr->len, out_frame, (int)sizeof out_frame);
   if (wlen <= 0) return;
   if (p_child_write(&P.child, out_frame, wlen) != P_OK) {
-    /* Either it died mid-write or it stopped draining. Both mean the same thing from here,
-     * and leaving it running would leave a half-frame in its pipe for a child we no longer
-     * believe in. */
+    /* died mid-write or stopped draining, which mean the same thing from here: leaving it
+     * running would leave a half-frame in the pipe of a child we no longer believe in */
     stop_child();
     send_status("child-down", "stuck writing to it");
     send_ident();
@@ -554,21 +525,20 @@ static void on_frame(const f_frame *fr) {
   n = f_fields(fr->payload, fr->len, f, F_MAX_FIELDS);
 
   if (fr->type == F_RESET) {
-    /* Drop everything provisional: a restored snapshot can leave us mid-transfer, and the
+    /* Drops everything provisional: a restored snapshot can leave us mid-transfer, and the
      * host sends this on every page load.
      *
-     * It deliberately does NOT clear the decoder. The bytes still buffered arrive *after*
-     * this frame, and the host sends RESET and ANNOUNCE back to back in its first tick, so
-     * they routinely land in one read: clearing here threw the announce away and left the
-     * guest silent until the next one two seconds later. Framing recovers from garbage on
-     * its own, which is the whole point of the CRC and the resynchronising decoder. */
+     * It deliberately does NOT clear the decoder. Buffered bytes arrive after this frame,
+     * and the host sends RESET and ANNOUNCE back to back in its first tick, so they
+     * routinely land in one read: clearing here threw the announce away and left the guest
+     * silent until the next one two seconds later. */
     xfer_abort();
     return;
   }
   if (n < 1) return; /* every other frozen message carries at least an epoch */
 
-  /* Once an epoch is known, anything from a different one is a ghost from a previous page
-   * and is ignored. A fresh ANNOUNCE is how a new page takes over. */
+  /* once an epoch is known, anything from a different one is a previous page and is
+   * ignored; a fresh ANNOUNCE is how a new page takes over */
   if (fr->type == F_ANNOUNCE) {
     f_field_str(&f[0], P.epoch, MAX_EPOCH);
     P.have_epoch = 1;
@@ -603,12 +573,12 @@ static void on_frame(const f_frame *fr) {
       break;
     }
     default:
-      /* IDENT, STATUS, PONG are ours to send, not to receive. Ignore rather than object. */
+      /* IDENT, STATUS, PONG are ours to send, not to receive */
       break;
   }
 }
 
-/* --- main --------------------------------------------------------------------------- */
+/* --- main --- */
 
 static void init(void) {
   int i;
@@ -630,14 +600,10 @@ int daemon_parent_main(void) {
   u32 last_supervise, last_byte;
 
   init();
-  /* Wait for the port rather than exiting without it.
-   *
-   * This runs from StartUp, so it races Windows bringing the machine up, and it is the one
-   * process here that cannot be restarted: a page reload restores saved RAM instead of
-   * re-running startup, so a parent that gave up at boot is gone from every restore of that
-   * save and only a Force Reboot brings it back. Exiting because COM1 was busy for a second
-   * would cost the whole session's tracking. Anything else holding the port (a modem
-   * dialler, a previous instance shutting down) resolves the same way. */
+  /* Waits for the port rather than exiting without it. This runs from StartUp, so it races
+   * Windows bringing the machine up, and a parent that gave up at boot is gone from every
+   * restore of that save. Anything else holding the port (a modem dialler, a previous
+   * instance shutting down) resolves the same way. */
   {
     int said = 0;
     while (p_serial_open() != P_OK) {
@@ -654,8 +620,8 @@ int daemon_parent_main(void) {
   for (;;) {
     int n = p_serial_read(in, (int)sizeof in);
     if (n == P_FAIL) {
-      /* The page went away. On Win32 the port stays open across page loads, so this only
-       * happens on POSIX when the test closes the pipe: exit cleanly. */
+      /* the page went away; on Win32 the port stays open across page loads, so this only
+       * happens on POSIX when the test closes the pipe */
       stop_child();
       return 0;
     }
@@ -663,7 +629,7 @@ int daemon_parent_main(void) {
       const u8 *p = in;
       int left = n;
       last_byte = p_ticks();
-      /* Push and drain: one read can carry several frames, and the decoder holds one. */
+      /* push and drain: one read can carry several frames, and the decoder holds one */
       while (left > 0) {
         f_frame fr;
         int took = f_dec_push(&dec, p, left);
@@ -674,8 +640,8 @@ int daemon_parent_main(void) {
       }
     }
 
-    /* Whatever the child says goes straight out: frames are self-delimiting, so this
-     * needs no parsing and stays a pipe rather than a participant. */
+    /* whatever the child says goes straight out: frames are self-delimiting, so this
+     * needs no parsing */
     if (P.child.running) {
       int m = p_child_read(&P.child, in, (int)sizeof in);
       if (m > 0) p_serial_write(in, m);

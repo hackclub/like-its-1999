@@ -1,12 +1,10 @@
-// A minimal, dependency-free ISO9660 (Level 1) writer — enough to hand v86 a
-// mountable CD-ROM image (see ../image-import.js and the preset-CD picker in
-// main.js). No Joliet/Rock Ridge, no subdirectories: plain 8.3 uppercase names in a
-// single flat root directory, which every CDFS driver back to Windows 95 reads
-// without extra IFS layers. That's the only shape this project needs; extending it
-// to subdirectories would mean a real path table (this one only ever has one entry).
+// dependency-free ISO9660 level 1 writer, enough to hand v86 a mountable cd image
+// (see ../image-import.js). no joliet or rock ridge and no subdirectories: plain 8.3
+// uppercase names in a single flat root directory, which every CDFS driver back to
+// windows 95 reads without extra IFS layers. adding subdirectories would mean a real
+// path table, which this one never needs since it only ever has a root entry
 //
-// Reference: ECMA-119 / ISO 9660:1988. Directory record + path table layouts below
-// cite section numbers from that spec.
+// field layouts below cite section numbers from ECMA-119 / ISO 9660:1988
 
 const SECTOR = 2048
 const enc = new TextEncoder()
@@ -23,8 +21,8 @@ function u32le(n) {
 function u32be(n) {
   return [(n >>> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
 }
-// Numeric fields in the PVD/directory records are stored in *both* byte orders
-// back-to-back (ECMA-119 7.2/7.3) so readers of either endianness can parse them.
+// numeric fields in the pvd and directory records are stored in both byte orders
+// back to back (ECMA-119 7.2/7.3), so readers of either endianness can parse them
 const both16 = (n) => [...u16le(n), ...u16be(n)]
 const both32 = (n) => [...u32le(n), ...u32be(n)]
 
@@ -50,7 +48,7 @@ function strField(str, len) {
   return out
 }
 
-// 17-byte digit-string date/time (ECMA-119 8.4.26.1).
+// 17-byte digit-string date/time (ECMA-119 8.4.26.1)
 function pvdDateTime(d) {
   const p2 = (n) => String(n).padStart(2, '0')
   const digits =
@@ -67,7 +65,7 @@ function unspecifiedDateTime() {
   return concat([new Uint8Array(16).fill(0x30), new Uint8Array([0])])
 }
 
-// 7-byte binary date/time used inside directory records (ECMA-119 9.1.5).
+// 7-byte binary date/time used inside directory records (ECMA-119 9.1.5)
 function dirDateTime(d) {
   return new Uint8Array([
     d.getUTCFullYear() - 1900,
@@ -80,12 +78,12 @@ function dirDateTime(d) {
   ])
 }
 
-// One directory record (ECMA-119 9.1). `nameStr` is '\0'/'\x01' for the self/parent
-// pseudo-entries, or an "8.3;1"-style identifier for a real file.
+// one directory record (ECMA-119 9.1). nameStr is '\0' or '\x01' for the self and
+// parent pseudo-entries, or an "8.3;1"-style identifier for a real file
 function dirRecord({ nameStr, isDir, lba, length, date }) {
   const nameBytes = enc.encode(nameStr)
   const bytes = [
-    0, // length — patched in below once known
+    0, // length, patched below once known
     0, // extended attribute record length
     ...both32(lba),
     ...both32(length),
@@ -102,7 +100,7 @@ function dirRecord({ nameStr, isDir, lba, length, date }) {
   return new Uint8Array(bytes)
 }
 
-// One path table entry (ECMA-119 9.4). This writer only ever has a root entry.
+// one path table entry (ECMA-119 9.4)
 function pathTableRecord({ order, lba }) {
   const nameBytes = new Uint8Array([0]) // root identifier
   const u32 = order === 'L' ? u32le : u32be
@@ -118,10 +116,9 @@ function pathTableRecord({ order, lba }) {
   return new Uint8Array(bytes)
 }
 
-// Coerce an arbitrary filename into a Level-1-legal "8.3;1" identifier. Defense in
-// depth, not a security boundary — callers (image-import.js) already dedupe/sanitize
-// before we get here, but a broken/oversized name should degrade gracefully, not
-// produce a corrupt image.
+// coerce a filename into a level-1-legal "8.3;1" identifier. callers
+// (image-import.js) already dedupe and sanitize; this is here so a broken or
+// oversized name degrades gracefully instead of producing a corrupt image
 function isoFileName(name) {
   const dot = name.lastIndexOf('.')
   const rawBase = dot === -1 ? name : name.slice(0, dot)
@@ -132,8 +129,7 @@ function isoFileName(name) {
   return (ext ? `${base}.${ext}` : base) + ';1'
 }
 
-// Build a flat, single-directory ISO9660 image.
-// `files`: [{ name: string, data: Uint8Array }, ...] — at least one entry required.
+// files: [{ name: string, data: Uint8Array }, ...], at least one entry
 export function buildIso9660({
   volumeLabel = 'DATA',
   files,
@@ -149,8 +145,8 @@ export function buildIso9660({
     .map((f) => ({ name: isoFileName(f.name), data: f.data }))
     .sort((a, b) => a.name.localeCompare(b.name))
 
-  // Fixed header layout: 16 reserved sectors, PVD, terminator, then one sector each
-  // for the (tiny, root-only) L- and M-order path tables.
+  // fixed header layout: 16 reserved sectors, pvd, terminator, then one sector each
+  // for the root-only L- and M-order path tables
   const pathTableLLBA = 18
   const pathTableMLBA = 19
   const rootLBA = 20
@@ -159,10 +155,8 @@ export function buildIso9660({
   const ptMUnpadded = pathTableRecord({ order: 'M', lba: rootLBA })
   const pathTableBytes = ptLUnpadded.length // same length in both orders
 
-  // Root directory content: self + parent + one record per file. The self/parent
-  // records need the directory's own (sector-rounded) length, which we only know
-  // after summing everything else — compute unpadded size first, then pad, then
-  // build the final self/parent records with that padded length.
+  // the self and parent records carry the root directory's own sector-rounded length,
+  // so size the unpadded content first and build them once that length is known
   const fileDataSizes = sorted.map((f) => f.data.length)
   const selfParentLen = 34 * 2
   const fileRecordLens = sorted.map(
@@ -175,7 +169,7 @@ export function buildIso9660({
   const rootDirSectors = Math.ceil(rootDirUnpaddedLen / SECTOR)
   const rootDirBytes = rootDirSectors * SECTOR
 
-  // Lay out file data after the root directory, sector-aligned per file.
+  // file data follows the root directory, sector-aligned per file
   let lba = rootLBA + rootDirSectors
   const fileLBAs = []
   for (const size of fileDataSizes) {

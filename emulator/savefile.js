@@ -1,12 +1,11 @@
-// The `.99sv` save container: a v86 state plus everything else a saved machine needs
-// to carry (which world it belongs to, time-tracking data, a thumbnail).
+// the `.99sv` save container: a v86 state plus which world it belongs to, time-tracking
+// data and a thumbnail
 //
-// Why a container at all: a v86 state only restores against the exact disk bytes and
-// machine config it was captured with, and a bare state records neither. Rebuild the
-// image and every old save/share silently restores into the wrong world. The container
-// pins each save to its world and leaves room for the rest.
+// a v86 state only restores against the exact disk bytes and machine config it was
+// captured with, and a bare state records neither, so the container pins each save to its
+// world
 //
-// Layout — fixed header, UNCOMPRESSED metadata, then independently-encoded chunks:
+// layout: fixed header, uncompressed metadata, then independently-encoded chunks
 //
 //   0   "99SV"                       magic
 //   4   u32  version                 what wrote this
@@ -19,46 +18,39 @@
 //       payloadStart = align4(32 + metaLen)
 //       chunk i at payloadStart + entry.offset, entry.length bytes
 //
-// `version` vs `minReader` is the compatibility hinge. A purely additive change (new
-// metadata keys, new chunks) bumps `version` and leaves `minReader` alone, so older
-// builds keep reading the file. Only a change that genuinely breaks old readers raises
-// `minReader`, and then they refuse it loudly instead of guessing. Without that split,
-// any future bump would lock every existing build out of every new file.
+// an additive change (new metadata keys, new chunks) bumps `version` and leaves
+// `minReader` alone so older builds keep reading the file; only a change that breaks old
+// readers raises `minReader`
 //
-// `totalLength` exists because a truncated upload otherwise parses as a perfectly valid
-// container: header, metadata and the small chunks all check out, and only the state
-// chunk fails much later. Participants upload these over flaky connections.
+// totalLength catches a truncated upload, which otherwise parses as a valid container
+// until the state chunk fails much later
 //
-// Metadata is deliberately outside the compression so it can be read from a single
-// small HTTP Range request — a share page or a review CLI can see the world, the
-// tracked hours and the thumbnail without pulling ~65 MB of RAM image.
+// metadata sits outside the compression so it can be read from one small HTTP Range
+// request, without pulling the ~65 MB RAM image
 //
-// Extensibility rules, which callers MUST honour:
+// extensibility rules callers must honour:
 //   - every metadata key except `chunks` is optional, and unknown keys are ignored
-//   - unknown chunks are preserved verbatim on rewrite (see storedChunk + pack's
-//     `stored` input), so an older build never strips data a newer one wrote
-// Only a breaking layout change bumps the container version.
+//   - unknown chunks are preserved verbatim on rewrite (storedChunk + pack's `stored`)
 //
-// Command-line tooling for these files lives in `scripts/savefile-cli.mjs`, deliberately
-// not here: this module ships to a browser, and a Node CLI inside it made every production
-// build externalize node:fs/promises.
+// command-line tooling lives in scripts/savefile-cli.mjs, not here: this module ships to
+// a browser, and a Node CLI inside it made every production build externalize
+// node:fs/promises
 //
-// This module is world-agnostic on purpose: it never resolves URLs or decides what a
-// world id means (see worlds.js). A legacy artifact (bare gzipped or raw v86 state,
-// which is every v1 save and every `?share=` link published so far) reads back with no
-// `world` at all, and the caller maps "no world" to the legacy world.
+// world-agnostic on purpose (see worlds.js): a legacy artifact (bare gzipped or raw v86
+// state, which is every v1 save and every published `?share=` link) reads back with no
+// `world`, and the caller maps that to the legacy world
 
 import { STATE_MAGIC, maybeGunzip } from './vmfs/state.js'
 
 export const CONTAINER_VERSION = 1
-// Raise only when a change genuinely breaks older readers (see the header notes).
+// raise only when a change genuinely breaks older readers
 const MIN_READER_VERSION = 1
 export const MAGIC = Uint8Array.of(0x39, 0x39, 0x53, 0x56) // "99SV"
 export const HEADER_SIZE = 32
 export const EXTENSION = '.99sv'
 
-// Metadata is read from a small Range request, so a corrupt or hostile metaLen must not
-// be able to turn that into a full download of the whole file.
+// metadata is read from a small Range request, so a corrupt or hostile metaLen must not
+// turn that into a full download
 export const MAX_META_BYTES = 1024 * 1024
 
 const te = new TextEncoder()
@@ -73,13 +65,11 @@ const toU8 = (input) =>
         input.byteLength
       )
 
-// Plain arithmetic, not bitwise: `&` coerces to int32, so a large offset would come back
-// negative and a negative payloadStart feeding subarray() reads the wrong bytes.
+// plain arithmetic rather than bitwise: `&` coerces to int32, so a large offset comes
+// back negative and a negative payloadStart feeding subarray() reads the wrong bytes
 const align4 = (n) => n + ((4 - (n % 4)) % 4)
 
 const isSize = (n) => Number.isSafeInteger(n) && n >= 0
-
-// --- isomorphic primitives ------------------------------------------------------
 
 async function gzip(bytes) {
   if (typeof CompressionStream !== 'undefined') {
@@ -122,11 +112,8 @@ function randomId() {
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-// --- detection ------------------------------------------------------------------
-
-// 'container' | 'legacy' | 'unknown'. "Legacy" is a bare v86 state, gzipped or not —
-// what every v1 save and every published share link is. Nothing downstream ever needs
-// to tell those two apart (maybeGunzip handles both), so they're one case.
+// 'container' | 'legacy' | 'unknown'; legacy is a bare v86 state, gzipped or not, and
+// nothing downstream needs to tell those two apart (maybeGunzip handles both)
 export function detectFormat(input) {
   const bytes = toU8(input)
   if (bytes.length >= HEADER_SIZE && MAGIC.every((b, i) => bytes[i] === b))
@@ -143,11 +130,8 @@ export function detectFormat(input) {
   return 'unknown'
 }
 
-// --- reading --------------------------------------------------------------------
-
-// Parse just the header + metadata. Accepts a truncated buffer (a Range-request
-// prefix) as long as it covers the metadata; throws if it doesn't, so a caller can
-// widen the range and retry.
+// accepts a truncated buffer (a Range-request prefix) as long as it covers the metadata;
+// throws if it doesn't, so a caller can widen the range and retry
 export function readContainerMeta(input) {
   const bytes = toU8(input)
   if (detectFormat(bytes) !== 'container')
@@ -156,7 +140,7 @@ export function readContainerMeta(input) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const version = view.getUint32(4, true)
   const minReader = view.getUint32(8, true)
-  // A newer *additive* version stays readable; only minReader locks us out.
+  // a newer additive version stays readable; only minReader locks us out
   if (minReader > CONTAINER_VERSION)
     throw new UnsupportedSaveError(
       `this save needs a newer version of the page (needs reader ` +
@@ -189,10 +173,8 @@ export function readContainerMeta(input) {
   return { version, minReader, meta, chunks, payloadStart, totalLength }
 }
 
-// The chunk table steers every later read, so treat it as hostile input. We don't try to
-// make a malicious file harmless to open (a giant chunk can still exhaust memory, which
-// is acceptable) — the goal is that a bad table can never make us read the WRONG bytes
-// and present them as a valid machine or as tracking evidence.
+// the chunk table steers every later read, so treat it as hostile input; a giant chunk
+// exhausting memory is acceptable, a bad table pointing at the wrong bytes is not
 function validateChunkTable(chunks, payloadStart, totalLength) {
   const seen = new Set()
   for (const c of chunks) {
@@ -200,8 +182,7 @@ function validateChunkTable(chunks, payloadStart, totalLength) {
       throw new Error('chunk table has an entry with no id')
     if (seen.has(c.id)) throw new Error(`duplicate chunk id "${c.id}"`)
     seen.add(c.id)
-    // Negative or non-integer offsets are the dangerous case: subarray() treats a
-    // negative index as "from the end" and NaN as 0, both of which silently succeed.
+    // subarray() treats a negative index as "from the end" and NaN as 0, both silently
     if (!isSize(c.offset) || !isSize(c.length))
       throw new Error(
         `chunk "${c.id}" has a bad offset/length (${c.offset}/${c.length})`
@@ -213,8 +194,8 @@ function validateChunkTable(chunks, payloadStart, totalLength) {
   }
 }
 
-// A save this build genuinely cannot read, as opposed to one that's damaged. Callers use
-// it to leave the stored copy alone instead of overwriting something they can't parse.
+// a save this build cannot read, as opposed to one that's damaged; callers use it to
+// leave the stored copy alone instead of overwriting something they can't parse
 export class UnsupportedSaveError extends Error {
   constructor(message) {
     super(message)
@@ -222,14 +203,13 @@ export class UnsupportedSaveError extends Error {
   }
 }
 
-// Open a save file of any accepted shape. Chunk bodies are decoded lazily, so reading
-// metadata off a full buffer costs nothing.
+// chunk bodies are decoded lazily, so reading metadata off a full buffer costs nothing
 export async function readSaveFile(input) {
   const bytes = toU8(input)
   const format = detectFormat(bytes)
 
   if (format === 'legacy') {
-    // No world recorded: the caller maps this to the legacy world.
+    // no world recorded: the caller maps this to the legacy world
     const meta = { legacy: true, chunks: [] }
     let cached = null
     return {
@@ -285,8 +265,6 @@ export async function readSaveFile(input) {
     if (codec === 'raw') out = stored
     else if (codec === 'gzip') out = await gunzip(stored)
     else throw new Error(`chunk "${id}" uses unknown codec "${codec}"`)
-    // The recorded size is worth checking precisely because it's cheap: it catches a
-    // chunk that decompressed to something other than what was written.
     if (entry.size != null && out.length !== entry.size)
       throw new Error(
         `chunk "${id}" decoded to ${out.length} bytes, expected ${entry.size}`
@@ -312,7 +290,6 @@ export async function readSaveFile(input) {
       if (!raw) throw new Error('container has no "state" chunk')
       return raw
     },
-    // JSON / NDJSON convenience for the tracking chunks.
     json: async (id) => {
       const raw = await chunk(id)
       return raw ? JSON.parse(td.decode(raw)) : null
@@ -329,17 +306,14 @@ export async function readSaveFile(input) {
   }
 }
 
-// --- writing --------------------------------------------------------------------
-
 // chunks[] entries are either
 //   { id, bytes, codec = 'gzip', extra, hash }   encode these bytes now, or
 //   { id, stored, entry }                        copy already-encoded bytes verbatim
-// The second form is how unknown chunks survive a rewrite: read them with
-// storedChunk(id) + chunkEntry(id) and hand them straight back.
+// the second form is how unknown chunks survive a rewrite: read them with
+// storedChunk(id) + chunkEntry(id) and hand them straight back
 //
-// `hash: true` records a sha256 of the uncompressed bytes. It's off by default because
-// the state chunk is ~65 MB and gets rewritten on every autosave; ask for it on the
-// small chunks whose integrity someone may need to argue about later.
+// `hash: true` records a sha256 of the uncompressed bytes, off by default because the
+// state chunk is ~65 MB and gets rewritten on every autosave
 export async function packSaveFile({ meta = {}, chunks = [] }) {
   const table = []
   const bodies = []
@@ -377,9 +351,8 @@ export async function packSaveFile({ meta = {}, chunks = [] }) {
     offset += stored.length
   }
 
-  // Spread first, then fill gaps: defaults written before the spread would be silently
-  // undone by an explicit `id: null` or `createdAt: undefined`, which is how a file
-  // loses its identity on a later save.
+  // spread first, then fill gaps: defaults written before the spread get undone by an
+  // explicit `id: null` or `createdAt: undefined`, losing the file's identity on resave
   const metaObject = { ...meta, chunks: table }
   if (!metaObject.id) metaObject.id = randomId()
   if (!Number.isFinite(metaObject.createdAt)) metaObject.createdAt = Date.now()
@@ -406,10 +379,8 @@ export async function packSaveFile({ meta = {}, chunks = [] }) {
   return out
 }
 
-// Read only the metadata of a remote save file. Streams and cancels rather than
-// trusting Range support: hosts sometimes answer a ranged request with the whole
-// object (see the R2/Cloudflare note in tmp-image-build/README.md), and we must not
-// download 65 MB to read a header.
+// streams and cancels rather than trusting Range support: hosts sometimes answer a ranged
+// request with the whole object (see the R2/Cloudflare note in tmp-image-build/README.md)
 export async function probeSaveFileMeta(url, opts = {}) {
   const doFetch = opts.fetch || globalThis.fetch
   const want = opts.initialBytes ?? 64 * 1024
@@ -446,8 +417,8 @@ export async function probeSaveFileMeta(url, opts = {}) {
     prefix.byteOffset,
     prefix.byteLength
   ).getUint32(12, true)
-  // Bounded before it's used as a fetch length: this whole function exists to avoid
-  // pulling tens of megabytes, so four corrupt bytes must not undo that.
+  // bounded before it's used as a fetch length, so four corrupt bytes can't turn this
+  // into a tens-of-megabytes download
   if (metaLen > MAX_META_BYTES)
     throw new Error(
       `container metadata is implausibly large (${metaLen} bytes)`

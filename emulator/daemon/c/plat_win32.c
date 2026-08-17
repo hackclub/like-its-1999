@@ -1,45 +1,39 @@
-/* The Windows 98 implementation of plat.h.
+/* the Windows 98 implementation of plat.h
  *
- * Every call here is one that has existed since Windows 95, because that is what running
- * on 98 means in practice. Two traps this navigates on purpose:
+ * Every call here has existed since Windows 95. Two 9x limits shape the file:
  *
- *   - SetHandleInformation is NT-only. Making our end of a pipe non-inheritable is done
- *     the 9x way, with DuplicateHandle.
- *   - Overlapped I/O on a COM port is not supported on 9x, so reads are non-blocking by
- *     timeout (COMMTIMEOUTS) rather than asynchronous.
+ *   - SetHandleInformation is NT-only, so a pipe end is made non-inheritable with
+ *     DuplicateHandle instead
+ *   - overlapped I/O on a COM port is unsupported, so reads are non-blocking by timeout
+ *     (COMMTIMEOUTS) rather than asynchronous
  *
- * No CRT: see crt0_win32.c. The strings here are plain byte loops for the same reason.
- */
+ * no CRT (see crt0_win32.c), which is why the string handling is byte loops */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tlhelp32.h> /* the 9x way to walk processes; psapi is NT-only */
 
 #include "plat.h"
 
-/* How long exec waits for output before returning and leaving the program running. */
+/* how long exec waits for output before returning and leaving the program running */
 #define EXEC_TIMEOUT_MS 4000
 
-/* Where "the wire" is depends on which binary this is, and only on Windows.
- *
- * The parent owns COM1. The child talks to the parent over the pipes it was spawned with,
- * which arrive as its standard handles. On POSIX both roles use stdin/stdout and the
- * distinction does not exist, which is exactly why no host test could catch getting this
- * wrong: the first build had the child open COM1, the parent already held it, and the
- * child exited within milliseconds of every spawn. */
 static int slen(const char *s) {
   int n = 0;
   while (s[n]) n++;
   return n;
 }
 
-/* --- the wire -------------------------------------------------------------------- */
+/* --- the wire --- */
+/* Only on Windows do the two roles differ: the parent owns COM1 and the child talks over
+ * the pipes it was spawned with, which arrive as its standard handles. On POSIX both use
+ * stdin/stdout, so no host test can catch a child that opens COM1 behind the parent. */
 
 #ifdef DAEMON_CHILD
 
 static HANDLE g_in = INVALID_HANDLE_VALUE;
 static HANDLE g_out = INVALID_HANDLE_VALUE;
 
-/* The child: the pipes the parent gave us. */
+/* the child: the pipes the parent gave us */
 int p_serial_open(void) {
   g_in = GetStdHandle(STD_INPUT_HANDLE);
   g_out = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -50,8 +44,8 @@ int p_serial_open(void) {
 int p_serial_read(u8 *buf, int max) {
   DWORD avail = 0, got = 0;
   if (g_in == INVALID_HANDLE_VALUE) return P_FAIL;
-  /* Peek first: a plain read on a pipe blocks until something arrives, and this loop has
-   * a liveness file to stamp and a foreground window to poll. */
+  /* peek first: a plain read on a pipe blocks until something arrives, and this loop has a
+   * liveness file to stamp and a foreground window to poll */
   if (!PeekNamedPipe(g_in, NULL, 0, NULL, &avail, NULL)) return P_FAIL;
   if (avail == 0) return 0;
   if ((int)avail > max) avail = (DWORD)max;
@@ -75,7 +69,7 @@ int p_serial_write(const u8 *buf, int len) {
 
 static HANDLE g_port = INVALID_HANDLE_VALUE;
 
-/* The parent: the real serial port. */
+/* the parent: the real serial port */
 int p_serial_open(void) {
   DCB dcb;
   COMMTIMEOUTS to;
@@ -84,9 +78,9 @@ int p_serial_open(void) {
                        0, NULL);
   if (g_port == INVALID_HANDLE_VALUE) return P_FAIL;
 
-  /* Ask for a receive buffer far bigger than the default kilobyte. The emulated UART
-   * delivers a host write as fast as the guest can take interrupts, so a burst arrives
-   * essentially instantly and a small driver buffer overruns before we get a poll in. */
+  /* a receive buffer far bigger than the default kilobyte: the emulated UART delivers a
+   * host write as fast as the guest takes interrupts, so a burst overruns a small driver
+   * buffer before we get a poll in */
   SetupComm(g_port, 16384, 16384);
 
   dcb.DCBlength = sizeof dcb;
@@ -95,20 +89,17 @@ int p_serial_open(void) {
   dcb.ByteSize = 8;
   dcb.Parity = NOPARITY;
   dcb.StopBits = ONESTOPBIT;
-  /* Every one of these is set explicitly rather than inherited from GetCommState, because
-   * the defaults differ between Windows versions and three of them would quietly destroy a
-   * binary protocol:
+  /* Set explicitly rather than inherited from GetCommState: the defaults differ between
+   * Windows versions and these would quietly destroy a binary protocol.
    *   fBinary        FALSE makes the driver treat EofChar as end of input
    *   fNull          TRUE discards every zero byte, and our frames are full of them
-   *   fAbortOnError  TRUE latches on the first overrun and refuses all further I/O
-   * The last one is the likeliest reason the first build went permanently deaf after a
-   * large push while still holding the port open. */
+   *   fAbortOnError  TRUE latches on the first overrun and refuses all further I/O */
   dcb.fBinary = TRUE;
   dcb.fNull = FALSE;
   dcb.fAbortOnError = FALSE;
   dcb.fParity = FALSE;
   dcb.fErrorChar = FALSE;
-  /* No flow control of any kind: v86 models neither RTS/CTS nor XON/XOFF faithfully. */
+  /* no flow control: v86 models neither RTS/CTS nor XON/XOFF faithfully */
   dcb.fOutxCtsFlow = FALSE;
   dcb.fOutxDsrFlow = FALSE;
   dcb.fDsrSensitivity = FALSE;
@@ -119,8 +110,8 @@ int p_serial_open(void) {
   if (!SetCommState(g_port, &dcb)) return P_FAIL;
   PurgeComm(g_port, PURGE_RXCLEAR | PURGE_TXCLEAR);
 
-  /* Return immediately with whatever is buffered: the loop polls rather than blocks, and
-   * 9x has no overlapped comm I/O to do it any other way. */
+  /* return immediately with whatever is buffered: the loop polls, and 9x has no overlapped
+   * comm I/O to do it any other way */
   to.ReadIntervalTimeout = MAXDWORD;
   to.ReadTotalTimeoutMultiplier = 0;
   to.ReadTotalTimeoutConstant = 0;
@@ -136,11 +127,10 @@ int p_serial_read(u8 *buf, int max) {
   COMSTAT st;
   if (g_port == INVALID_HANDLE_VALUE) return P_FAIL;
 
-  /* Unconditionally, every poll, before reading. An overrun or framing error latches in
-   * the driver, and on 9x a latched error can stop delivery entirely while ReadFile keeps
-   * cheerfully returning success with nothing in it — which looks exactly like an idle
-   * port and is impossible to tell apart from one. Clearing first costs nothing and means
-   * a lost byte only ever costs us a frame, which the decoder resynchronises past. */
+  /* Every poll, before reading. An overrun or framing error latches in the driver, and on
+   * 9x a latched error can stop delivery entirely while ReadFile keeps returning success
+   * with nothing in it, which is indistinguishable from an idle port. Clearing first means
+   * a lost byte only costs a frame, which the decoder resynchronises past. */
   ClearCommError(g_port, &errors, &st);
 
   if (!ReadFile(g_port, buf, (DWORD)max, &got, NULL)) {
@@ -164,7 +154,7 @@ int p_serial_write(const u8 *buf, int len) {
 
 #endif /* DAEMON_CHILD */
 
-/* --- the child ------------------------------------------------------------------- */
+/* --- the child --- */
 
 void p_child_init(p_child *c) {
   c->proc = NULL;
@@ -174,8 +164,8 @@ void p_child_init(p_child *c) {
   c->nonblocking = 0;
 }
 
-/* A pipe end the child must not inherit. SetHandleInformation would be the modern way and
- * does not exist on 9x, so duplicate it without inheritance and drop the original. */
+/* a pipe end the child must not inherit; SetHandleInformation does not exist on 9x, so
+ * duplicate without inheritance and drop the original */
 static HANDLE uninheritable(HANDLE h) {
   HANDLE copy = NULL;
   HANDLE self = GetCurrentProcess();
@@ -208,10 +198,10 @@ int p_child_spawn(p_child *c, const char *path, const char *arg) {
   in_w = uninheritable(in_w);
   out_r = uninheritable(out_r);
 
-  /* Refuse to block when the child stops reading. PIPE_NOWAIT is the legacy LAN Manager
-   * mode and is exactly what it is good for here: WriteFile then returns immediately,
-   * having written what fit. If 9x declines it we remember that, and parent.c refuses to
-   * forward to a child that has stopped proving it is alive. */
+  /* PIPE_NOWAIT is the legacy LAN Manager mode: WriteFile returns immediately having
+   * written what fit, so a child that stops reading cannot block us. If 9x declines it we
+   * remember, and parent.c refuses to forward to a child that has stopped proving it is
+   * alive. */
   {
     DWORD mode = PIPE_NOWAIT;
     c->nonblocking = SetNamedPipeHandleState(in_w, &mode, NULL, NULL) ? 1 : 0;
@@ -223,10 +213,9 @@ int p_child_spawn(p_child *c, const char *path, const char *arg) {
     for (i = 0; arg[i] && n < (int)sizeof cmd - 1; i++) cmd[n++] = arg[i];
   }
   cmd[n] = 0;
-  /* Somewhere on the hard disk, never wherever the parent happened to be started from. A
-   * child that inherits a CD as its working directory keeps the tray locked and dies with
-   * the disc, and on 9x a working directory on removable media is enough on its own to
-   * stop COMMAND.COM launching. */
+  /* Somewhere on the hard disk, never wherever the parent was started from: a child that
+   * inherits a CD as its working directory keeps the tray locked and dies with the disc,
+   * and on 9x a working directory on removable media stops COMMAND.COM launching. */
   p_base_dir(here, (int)sizeof here);
 
   for (i = 0; i < (int)sizeof si; i++) ((char *)&si)[i] = 0;
@@ -280,8 +269,8 @@ void p_child_kill(p_child *c) {
 int p_child_read(p_child *c, u8 *buf, int max) {
   DWORD avail = 0, got = 0;
   if (!c->running || !c->from_out) return 0;
-  /* Peek first: a plain ReadFile on a pipe blocks until something arrives, which would
-   * stall the supervision loop. PeekNamedPipe works on anonymous pipes on 9x. */
+  /* peek first: a plain ReadFile on a pipe blocks and would stall the supervision loop;
+   * PeekNamedPipe works on anonymous pipes on 9x */
   if (!PeekNamedPipe((HANDLE)c->from_out, NULL, 0, NULL, &avail, NULL)) return P_FAIL;
   if (avail == 0) return 0;
   if ((int)avail > max) avail = (DWORD)max;
@@ -300,15 +289,15 @@ int p_child_write(p_child *c, const u8 *buf, int len) {
       return P_FAIL;
     at += (int)wrote;
     if (at >= len) break;
-    /* In PIPE_NOWAIT mode a full pipe is a successful write of zero bytes, so this is the
-     * ordinary "child is behind" path rather than an error. */
+    /* in PIPE_NOWAIT mode a full pipe is a successful write of zero bytes, so this is the
+     * ordinary "child is behind" path rather than an error */
     if ((u32)(p_ticks() - deadline) < 0x80000000UL) return P_FAIL;
     Sleep(5);
   }
   return P_OK;
 }
 
-/* --- files ----------------------------------------------------------------------- */
+/* --- files --- */
 
 int p_file_write(const char *path, const u8 *buf, int len) {
   HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
@@ -372,10 +361,10 @@ int p_env_int(const char *name, int def) {
   return v;
 }
 
-/* --- what the child reports -------------------------------------------------------- */
+/* --- what the child reports --- */
 
-/* The executable behind a window. ToolHelp32 is the 9x way to walk processes; the psapi
- * route everyone reaches for first is NT-only, and this only ever runs on 98. */
+/* the executable behind a window; ToolHelp32 is the 9x way to walk processes, psapi is
+ * NT-only */
 static void exe_for_window(HWND w, char *exe, int cap) {
   DWORD pid = 0;
   HANDLE snap;
@@ -389,7 +378,7 @@ static void exe_for_window(HWND w, char *exe, int cap) {
   if (Process32First(snap, &pe)) {
     do {
       if (pe.th32ProcessID == pid) {
-        /* szExeFile is a full path on 9x; keep only the file name. */
+        /* szExeFile is a full path on 9x, so keep only the file name */
         int i, start = 0;
         for (i = 0; pe.szExeFile[i]; i++)
           if (pe.szExeFile[i] == '\\' || pe.szExeFile[i] == '/') start = i + 1;
@@ -412,9 +401,8 @@ void p_foreground(char *exe, int exe_cap, char *title, int title_cap) {
   exe_for_window(w, exe, exe_cap);
 }
 
-/* Why something failed, written where the caller can see it: these run inside the guest,
- * where there is no console and no debugger, so an error code that never leaves the
- * process is an afternoon of guessing. */
+/* Why something failed, written where the caller can see it. The guest has no console and
+ * no debugger, so an error code that never leaves the process cannot be recovered. */
 static void why(char *out, int cap, const char *what, DWORD err) {
   char num[12];
   int n = 0, i, d = 0;
@@ -430,8 +418,8 @@ static void why(char *out, int cap, const char *what, DWORD err) {
   out[n] = 0;
 }
 
-/* Run a command through the shell and capture what it prints. COMMAND.COM rather than
- * cmd.exe, because this is Windows 98. */
+/* runs a command through the shell and captures what it prints; COMMAND.COM rather than
+ * cmd.exe, because this is Windows 98 */
 int p_exec(const char *cmd, char *out, int cap) {
   SECURITY_ATTRIBUTES sa;
   STARTUPINFOA si;
@@ -444,10 +432,9 @@ int p_exec(const char *cmd, char *out, int cap) {
   DWORD code = 0;
 
   out[0] = 0;
-  /* COMSPEC rather than a bare "COMMAND.COM": the search CreateProcess does without a full
-   * path starts at the calling image's directory and the current directory, and this
-   * process gets launched with whatever the parent inherited, which has been E:\ often
-   * enough to matter. */
+  /* COMSPEC rather than a bare "COMMAND.COM": without a full path CreateProcess searches
+   * the calling image's directory and the current directory, and this process runs with
+   * whatever the parent inherited, which has been E:\ often enough to matter */
   if (!GetEnvironmentVariableA("COMSPEC", shell, (DWORD)sizeof shell)) {
     const char *def = "C:\\WINDOWS\\COMMAND.COM";
     for (i = 0; def[i]; i++) shell[i] = def[i];
@@ -462,9 +449,8 @@ int p_exec(const char *cmd, char *out, int cap) {
   }
   r = uninheritable(r);
 
-  /* A real handle rather than NULL. 9x is far less forgiving than NT here: with
-   * STARTF_USESTDHANDLES it hands all three straight to the new process, and a null stdin
-   * is what a COMMAND.COM launch trips over. */
+  /* a real handle rather than NULL: with STARTF_USESTDHANDLES 9x hands all three straight
+   * to the new process, and a null stdin is what a COMMAND.COM launch trips over */
   nul = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
                     OPEN_EXISTING, 0, NULL);
 
@@ -496,13 +482,10 @@ int p_exec(const char *cmd, char *out, int cap) {
   CloseHandle(w); /* our copy: the read ends when the child's copy closes */
   CloseHandle(pi.hThread);
 
-  /* Collect output with a deadline, peeking rather than blocking.
-   *
-   * Reading to EOF would be the obvious thing and is a trap: a GUI program launched from
-   * the shell inherits the pipe's write end, so the pipe never closes while its window is
-   * open, and a blocking read would hang the child until the user closed it. The child
-   * would then stop stamping its liveness file and the parent would kill it, all because
-   * somebody opened Notepad. */
+  /* Collect output with a deadline, peeking rather than blocking. Reading to EOF hangs: a
+   * GUI program launched from the shell inherits the pipe's write end, so the pipe stays
+   * open as long as its window does, the child stops stamping its liveness file, and the
+   * parent kills it because somebody opened Notepad. */
   n = 0;
   {
     u32 deadline = p_ticks() + EXEC_TIMEOUT_MS;
@@ -516,7 +499,7 @@ int p_exec(const char *cmd, char *out, int cap) {
         n += (int)got;
         continue;
       }
-      /* Nothing waiting: stop once the process is gone, or the deadline passes. */
+      /* nothing waiting: stop once the process is gone, or the deadline passes */
       if (!GetExitCodeProcess(pi.hProcess, &code) || code != STILL_ACTIVE) break;
       if ((u32)(p_ticks() - deadline) < 0x80000000UL) break;
       Sleep(20);
@@ -552,8 +535,8 @@ void p_diag(char *out, int cap) {
   DIAG_ADD(part);
   why(part, (int)sizeof part, " snap", (DWORD)(snap != INVALID_HANDLE_VALUE));
   DIAG_ADD(part);
-  /* The environment the child inherited. CreateProcess finds COMMAND.COM through PATH,
-   * so an empty environment looks exactly like a missing shell. */
+  /* CreateProcess finds COMMAND.COM through PATH, so an empty environment looks exactly
+   * like a missing shell */
   DIAG_ADD(" comspec=");
   part[0] = 0;
   GetEnvironmentVariableA("COMSPEC", part, (DWORD)sizeof part);
@@ -569,14 +552,13 @@ void p_diag(char *out, int cap) {
   if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
 }
 
-/* --- time and logging -------------------------------------------------------------- */
+/* --- time and logging --- */
 
 u32 p_ticks(void) { return (u32)GetTickCount(); }
 
 void p_sleep(int ms) { Sleep((DWORD)ms); }
 
-/* There is no console on a windows-subsystem program, so this goes where a debugger can
- * see it. Silent in normal operation. */
+/* a windows-subsystem program has no console, so this goes where a debugger can see it */
 void p_log(const char *msg) {
   OutputDebugStringA(msg);
   (void)slen(msg);

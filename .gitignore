@@ -23,3 +23,6 @@ emulator/daemon/build/
 # `vercel env pull`. The sealing private key lives in tmp-hb-keys.json, matched by tmp*.
 .env*
 .vercel
+public/vm-v2/
+public/vm-fmt/
+public/vm-newc/

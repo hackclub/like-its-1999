@@ -1,9 +1,6 @@
-// The wire format is written twice, in frame.js and in c/frame.h, and the golden vectors
-// only pin down the parts a fixture happens to exercise. A type number that drifts on one
-// side is not a decode failure: it is a frame delivered to the wrong handler, or forwarded
-// to the child instead of answered by the parent, which is far quieter and far worse.
-//
-// So the numbers themselves are compared, by reading the header.
+// the golden vectors only pin down the parts a fixture exercises, and a type number that
+// drifts between frame.js and c/frame.h is not a decode failure: it is a frame delivered
+// to the wrong handler, so the numbers themselves are compared by reading the C header
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -53,9 +50,9 @@ test('every message type has the same number on both sides', () => {
   }
 })
 
-// The split the parent depends on: it answers everything up to F_FROZEN_MAX itself and
-// forwards the rest verbatim, so a new type on the wrong side of the line would either be
-// swallowed by a binary that cannot be updated or forwarded to a child that cannot answer.
+// the parent answers everything up to F_FROZEN_MAX itself and forwards the rest verbatim,
+// so a type on the wrong side is either swallowed by a binary that cannot be updated or
+// forwarded to a child that cannot answer
 test('the frozen range holds exactly the messages the parent implements', () => {
   const parent = [
     'RESET',

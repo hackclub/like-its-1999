@@ -1,18 +1,13 @@
-/* Cross-language golden vectors: the C half.
+/* cross-language golden vectors, C half
  *
  * Reads a file of frames produced by frame.js, decodes every one, re-encodes it from the
  * decoded type and fields, and writes the result back out. A Node test then decodes that
- * output and compares it to the table it started from.
- *
- * If the two implementations disagree anywhere — CRC, field lengths, header layout,
- * integer encoding — the bytes come back different and the test fails. Two independent
- * implementations of a wire format silently drifting apart is the likeliest bug in this
- * phase, and this is the only thing that actually pins them together.
+ * output and compares it to the table it started from, so any disagreement over CRC,
+ * field lengths, header layout, or integer encoding comes back as different bytes.
  *
  *   test_golden <in.bin> <out.bin>
  *
- * Host-only: uses stdio, which the guest build never links.
- */
+ * host-only: uses stdio, which the guest build never links */
 #include <stdio.h>
 
 #include "frame.h"
@@ -42,8 +37,8 @@ int main(int argc, char **argv) {
 
   f_dec_init(&d);
 
-  /* Push and drain in a loop: the decoder holds one frame at most, and this fixture is
-   * deliberately larger than that. */
+  /* push and drain in a loop: the decoder holds one frame at most, and this fixture is
+   * deliberately larger than that */
   {
     const u8 *p = input;
     int left = in_len;
@@ -63,7 +58,7 @@ int main(int argc, char **argv) {
           return 1;
         }
 
-        /* Re-encode from what we decoded, not from the original bytes. */
+        /* re-encode from what we decoded, not from the original bytes */
         f_build_init(&b, payload, sizeof payload);
         for (i = 0; i < count; i++) f_add_bytes(&b, fields[i].p, fields[i].len);
         plen = f_build_len(&b);

@@ -25,18 +25,15 @@
         gap: 12px;
         align-items: center;
       }
-      /* The parent adds .fs to <body> when it fullscreens the iframe — hide the
-         toolbar so only the Win98 screen shows. */
+      /* the parent adds .fs to <body> when it fullscreens the iframe */
       body.fs #toolbar {
         display: none;
       }
-      /* Shown only when the tab is running a ?share= machine (see main.js). */
       #shared-badge {
         color: #000;
         background: #ffcc00;
         padding: 2px 6px;
       }
-      /* Holds the emulator, centered, and is the element that goes fullscreen. */
       #screen_holder {
         flex: 1 1 auto;
         display: flex;
@@ -44,17 +41,14 @@
         justify-content: center;
         overflow: hidden;
       }
-      /* We fullscreen the holder (not the canvas' container) so #screen_container
-         keeps shrink-wrapping the canvas — v86 maps the absolute mouse against the
-         container's rect, so container==canvas keeps the cursor accurate. The
-         holder just centers the canvas on black. */
+      /* the holder fullscreens, not #screen_container, so the container keeps
+         shrink-wrapping the canvas: v86 maps the absolute mouse against the
+         container's rect, so container == canvas keeps the cursor accurate */
       #screen_holder:fullscreen {
         background: #000;
       }
-      /* v86 renders text mode into the <div> and graphics into the <canvas>;
-         it toggles their visibility itself. Force nearest-neighbour scaling so
-         the pixel art stays crisp — v86 only sets this itself at scale >= 1, but
-         we scale by fractional amounts to hit exact integer device multiples. */
+      /* v86 only sets pixelated itself at scale >= 1, and main.js scales by
+         fractional amounts to hit exact integer device multiples */
       #screen_container canvas {
         image-rendering: pixelated;
       }
@@ -62,6 +56,11 @@
         white-space: pre;
         font: 14px monospace;
         line-height: 14px;
+        /* v86 scales the text div by writing both an explicit width/height and a css
+           transform, so the layout box grows as the square of the scale while the glyphs
+           grow linearly. anchoring top-left keeps the glyphs inside the box; main.js
+           then trims the box back to the glyph extent so the holder centres it */
+        transform-origin: top left;
       }
     </style>
   </head>

@@ -1,9 +1,6 @@
-// The impure edge: emulator in, agent and log out.
-//
-// Everything with a decision in it lives in agent.js and tracking.js, which are pure and
-// tested. This file is the part that cannot be: it holds the serial port, a timer, and the
-// promise bookkeeping that turns the agent's request/reply frames into `await link.call()`.
-// Keep it boring.
+// the impure edge: holds the serial port, a timer, and the promise bookkeeping that turns
+// the agent's request/reply frames into `await link.call()`. everything with a decision in
+// it lives in agent.js and tracking.js, which are pure and tested
 
 import { createDecoder, encode } from './frame.js'
 import * as agentModule from './agent.js'
@@ -12,16 +9,15 @@ import * as log from './tracking.js'
 
 export const TICK_MS = 1000
 
-// v86 sends raw set-1 scancodes on `keyboard-code`, so every physical keypress produces a
-// make code and a break code. Break codes have bit 7 set and 0xE0 is an extended-key
-// prefix, so counting only plain make codes approximates real keystrokes. Mouse *movement*
-// is deliberately not counted as activity: moving a pointer while reading is not work, and
-// a jiggler would make it meaningless.
+// v86 sends raw set-1 scancodes on `keyboard-code`, so every keypress produces a make code
+// and a break code; break codes have bit 7 set and 0xe0 is an extended-key prefix, so plain
+// make codes approximate real keystrokes. mouse movement is deliberately not activity, since
+// a jiggler would make it meaningless
 const isKeyDown = (code) => code !== 0xe0 && (code & 0x80) === 0
 
-// `mouse-click` carries the state of [left, middle, right] and is sent on both press and
-// release — and again as all-false when the pointer leaves the canvas. Counting every event
-// therefore counted every click at least twice. Only a button going down is a click.
+// `mouse-click` carries the state of [left, middle, right] and is sent on press and on
+// release, and again as all-false when the pointer leaves the canvas, so only a button going
+// down is a click
 function countPresses(previous, next) {
   let presses = 0
   for (let i = 0; i < 3; i++) if (next[i] && !previous[i]) presses++
@@ -49,7 +45,7 @@ export function createLink({
       try {
         emulator.serial_send_bytes(0, encode(f.type, f.fields))
       } catch (e) {
-        // A dead or restarting emulator must not take the page down with it.
+        // a dead or restarting emulator must not take the page down with it
         console.debug('serial write failed:', e.message)
       }
     }
@@ -79,14 +75,9 @@ export function createLink({
     }
   }
 
-  // Ask what is in front the moment a child appears.
-  //
-  // Two reasons, and the second is not optional. The obvious one: the log should say what
-  // the machine is doing now rather than waiting for the user to switch programs. The
-  // load-bearing one: the child learns the epoch from the calls it receives, and it needs
-  // one before it can address an unsolicited event. Without a first call it would sit
-  // there with nothing to answer to and never report a window at all, which is precisely
-  // what the native test caught.
+  // ask what is in front the moment a child appears: the child learns the epoch from the
+  // calls it receives and needs one before it can address an unsolicited event, so without a
+  // first call it never reports a window at all
   const primeForeground = () => {
     const c = agentModule.call(agent, 'getForeground', [], now())
     if (!c) return
@@ -109,15 +100,14 @@ export function createLink({
     if (!stopped) pump(Uint8Array.of(byte))
   })
 
-  // Input counters, taken from v86's bus rather than the DOM so they count what actually
-  // reached the guest, from any source, with no focus heuristics.
+  // input counters come from v86's bus rather than the DOM, so they count what actually
+  // reached the guest, from any source, with no focus heuristics
   //
-  // Which endpoint matters. v86's bus is a connected pair: a send on one side is delivered
-  // to listeners on the *other*. Output from the machine (`serial0-output-byte`) travels
-  // device -> adapter, so `add_listener` sees it. Input travels adapter -> device, so
-  // `add_listener` never sees it — those events land on `bus.pair`, where the devices
-  // listen. Registering input counters with `add_listener` silently counts nothing, which
-  // is exactly what it did the first time this was written.
+  // which endpoint matters: v86's bus is a connected pair, and a send on one side is
+  // delivered to listeners on the other. output from the machine (`serial0-output-byte`)
+  // travels device -> adapter, so `add_listener` sees it; input travels adapter -> device
+  // and lands on `bus.pair`, where the devices listen. registering input counters with
+  // `add_listener` silently counts nothing
   const input = (counts) => !stopped && log.onInput(trackingLog, counts, now())
   const pair = emulator.bus?.pair
   if (pair?.register) {
@@ -139,7 +129,7 @@ export function createLink({
     )
     pair.register('mouse-wheel', () => input({ wheel: 1 }), null)
   } else {
-    // The internal shape changed under us: say so rather than record zero forever.
+    // the internal shape changed under us: say so rather than record zero forever
     console.warn('v86 bus.pair is unavailable; input will not be counted')
   }
 
@@ -160,12 +150,10 @@ export function createLink({
       return agent.state
     },
 
-    // Await a function on the child. Rejects rather than hanging when there is no child;
-    // the agent's own timeout covers a child that never answers.
+    // rejects rather than hanging when there is no child; the agent's own timeout covers a
+    // child that never answers
     call(fn, args = []) {
       const c = agentModule.call(agent, fn, args, now())
-      // Say why, not just no. "absent" means nothing is running in the guest at all,
-      // which until the agent ships in the image is the normal state after any reload.
       if (!c)
         return Promise.reject(
           new Error(
@@ -178,7 +166,7 @@ export function createLink({
       )
     },
 
-    // A new build became available while the page was open.
+    // a new build became available while the page was open
     setWanted(build) {
       send(agentModule.setWanted(agent, build))
     },
@@ -187,7 +175,7 @@ export function createLink({
       log.onVisibility(trackingLog, visible, now())
     },
 
-    // Close the open span and hand back the log, for writing into a save.
+    // close the open span and hand back the log, for writing into a save
     seal() {
       log.seal(trackingLog)
       return trackingLog

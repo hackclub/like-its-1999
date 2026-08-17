@@ -1,15 +1,10 @@
-// A read-only block device that presents a base disk image with a v86 overlay
-// painted on top — the disk exactly as the guest saw it when the state was saved.
-//
-// The base is any BaseSource: an object with `readRange(offset, length) ->
-// Promise<Uint8Array>` and optionally a `size`. Overlay blocks (guest writes) are
-// served from memory; everything else is read from the base. Reads from the base are
-// coalesced into the fewest contiguous ranges possible, so when the base is a remote
-// URL we issue the minimum number of Range requests and never fetch a byte we don't
-// need.
+// read-only view of a base disk image with a v86 overlay (the guest's writes) painted
+// over it, i.e. the disk as the guest saw it when the state was saved. base is any
+// BaseSource: { readRange(offset, length) -> Promise<Uint8Array>, size? }. base reads
+// are coalesced into the fewest contiguous ranges, so a remote base costs the minimum
+// number of Range requests
 
 export class OverlayBlockDevice {
-  // overlay: DiskOverlay | null. base: BaseSource. blockSize defaults to overlay's.
   constructor(base, overlay, blockSize) {
     this.base = base
     this.overlay = overlay || null
@@ -22,16 +17,13 @@ export class OverlayBlockDevice {
     return this.base.size ?? 0
   }
 
-  // Read [offset, offset+length) as a single Uint8Array.
   async read(offset, length) {
     const out = new Uint8Array(length)
     const bs = this.blockSize
     const first = Math.floor(offset / bs)
     const last = Math.floor((offset + length - 1) / bs)
 
-    // Figure out which whole blocks are missing from the overlay, then read them
-    // from the base in coalesced runs. Blocks present in the overlay are painted in
-    // afterward. We fetch base data block-aligned so the copy math stays simple.
+    // base reads are block-aligned so the copy math below stays simple
     let runStart = -1
     const runs = []
     for (let b = first; b <= last; b++) {
@@ -48,7 +40,6 @@ export class OverlayBlockDevice {
       const rOff = rs * bs
       const rLen = (re - rs + 1) * bs
       const data = await this.#baseRead(rOff, rLen)
-      // Copy the requested slice of this run into out.
       const copyStart = Math.max(offset, rOff)
       const copyEnd = Math.min(offset + length, rOff + rLen)
       out.set(
@@ -57,7 +48,6 @@ export class OverlayBlockDevice {
       )
     }
 
-    // Paint overlay blocks over the result.
     if (this.overlay) {
       for (let b = first; b <= last; b++) {
         const blk = this.overlay.block(b)
@@ -76,7 +66,7 @@ export class OverlayBlockDevice {
   }
 
   async #baseRead(offset, length) {
-    // Clamp to the base size if known (the last block may run past the end).
+    // the last block of a run can start past the end of the base
     let len = length
     if (this.base.size != null)
       len = Math.min(len, Math.max(0, this.base.size - offset))
@@ -85,15 +75,14 @@ export class OverlayBlockDevice {
     this.bytesFetched += data.length
     this.rangeRequests += 1
     if (len === length) return data
-    // Pad the tail (past EOF) with zeros so callers always get `length` bytes.
+    // zero-pad past EOF so callers always get `length` bytes
     const padded = new Uint8Array(length)
     padded.set(data, 0)
     return padded
   }
 }
 
-// BaseSource backed by a local file (Node). Uses a file handle + positional reads,
-// so only the requested ranges ever touch disk.
+// BaseSource over a local file (node)
 export async function nodeFileSource(path) {
   const fs = await import('node:fs/promises')
   const handle = await fs.open(path, 'r')
@@ -111,8 +100,8 @@ export async function nodeFileSource(path) {
   }
 }
 
-// BaseSource backed by an HTTP URL that supports Range requests (browser or Node).
-// `size` is discovered lazily from the first ranged response's Content-Range.
+// BaseSource over an HTTP URL that supports Range requests; size comes from the first
+// response's Content-Range if not passed in
 export function httpRangeSource(url, knownSize) {
   let size = knownSize ?? null
   return {
@@ -136,17 +125,10 @@ export function httpRangeSource(url, knownSize) {
   }
 }
 
-// A FatFs device backed by a *running* v86 emulator's disk buffer.
-//
-// This is the efficient path for browsing the live VM: v86's `buffer.get()` already
-// merges the guest's writes over the base image AND reuses the emulator's own chunk
-// cache — so we don't save_state, don't parse an overlay, and don't re-download bytes
-// the VM already has. It also reflects unsaved changes. v86 requires 256-byte-aligned
-// reads, so we align to the block boundary and slice the result.
-//
-// `buffer` is emulator.v86.cpu.devices.ide.primary.master.buffer (C:) etc. Unlike the sources
-// above this is a complete device (it exposes `read`, not `readRange`) because the
-// overlay is already baked into what `get()` returns.
+// device over a running v86 emulator's disk buffer, e.g.
+// emulator.v86.cpu.devices.ide.primary.master.buffer for C:. buffer.get() already
+// merges the guest's writes over the base and reuses v86's chunk cache, so this needs
+// no overlay and reflects unsaved changes. v86 requires 256-byte-aligned reads
 export function v86Device(buffer, size = buffer.byteLength) {
   const ALIGN = 256
   return {
@@ -164,7 +146,7 @@ export function v86Device(buffer, size = buffer.byteLength) {
   }
 }
 
-// BaseSource backed by an in-memory buffer (tests, or an already-loaded image).
+// BaseSource over an in-memory buffer
 export function bufferSource(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
   return {

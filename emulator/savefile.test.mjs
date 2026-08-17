@@ -1,8 +1,7 @@
 // node --test emulator/savefile.test.mjs
 //
-// Covers the two things that must never regress: a legacy v1 artifact (every published
-// ?share= link) still reads, and a save file can't talk the emulator into mounting
-// disks from somewhere we didn't put them.
+// every published ?share= link is a legacy v1 artifact, so reading v1 must keep working;
+// a save file also names the disks the emulator mounts, so only our own hosts are allowed
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -20,6 +19,7 @@ import {
 import {
   WORLDS,
   LEGACY_WORLD_ID,
+  V2_WORLD_ID,
   CDN_HOST,
   resolveWorld,
   validateWorld,
@@ -37,7 +37,7 @@ const ORIGIN = 'http://localhost:5173'
 const prod = { origin: ORIGIN, dev: false }
 const dev = { origin: ORIGIN, dev: true }
 
-// A minimal but structurally real v86 state: 4×i32 header then the JSON blob.
+// structurally real v86 state: 4x i32 header then the json blob
 function fakeState(extra = 0) {
   const json = te.encode(JSON.stringify({ buffer_infos: [], state: [] }))
   const total = 16 + json.length + extra
@@ -58,7 +58,7 @@ const HEARTBEATS = te.encode(
 // --- container round trip --------------------------------------------------------
 
 test('packs and reads back a container', async () => {
-  const state = fakeState(64 * 1024) // padded so gzip has something to chew on
+  const state = fakeState(64 * 1024) // padded so gzip has something to do
   const thumb = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 1, 2, 3)
   const bytes = await packSaveFile({
     meta: {
@@ -130,8 +130,7 @@ test('unknown chunks and unknown metadata keys survive a rewrite', async () => {
     ],
   })
 
-  // Rewrite the way persist.js does: re-encode what we understand, pass the rest
-  // through verbatim.
+  // rewrite the way persist.js does: re-encode what we understand, pass the rest through
   const old = await readSaveFile(first)
   const carried = old.chunks
     .filter((c) => c.id !== 'state')
@@ -149,9 +148,8 @@ test('unknown chunks and unknown metadata keys survive a rewrite', async () => {
 })
 
 test('repeated saves keep chunks the caller no longer supplies', async () => {
-  // The regression this guards: treat the boot-time save as `prior` forever and the
-  // second write mints a new file id and silently drops the thumbnail (and, later, the
-  // heartbeat log). `prior` must advance to the file just written.
+  // `prior` must advance to the file just written, or each save mints a new file id and
+  // drops the chunks it was not given again
   const thumb = te.encode('pretend png')
   const first = await packSaveFile({
     meta: { world: WORLDS.get(LEGACY_WORLD_ID) },
@@ -161,7 +159,6 @@ test('repeated saves keep chunks the caller no longer supplies', async () => {
     ],
   })
 
-  // Emulate three successive saves that supply no thumbnail, each one advancing prior.
   let prior = await readSaveFile(first)
   for (let i = 0; i < 3; i++) {
     const carried = prior.chunks
@@ -183,8 +180,7 @@ test('repeated saves keep chunks the caller no longer supplies', async () => {
 })
 
 test('an additive newer version stays readable, a breaking one does not', async () => {
-  // The compat hinge: bumping `version` alone must not lock existing builds out of new
-  // files, or every future change becomes a flag day.
+  // bumping `version` alone must not lock existing builds out of new files
   const additive = await packSaveFile({
     meta: { world: WORLDS.get(LEGACY_WORLD_ID) },
     chunks: [{ id: 'state', bytes: fakeState() }],
@@ -206,8 +202,8 @@ test('an additive newer version stays readable, a breaking one does not', async 
 })
 
 test('detects a truncated file instead of reading it as valid', async () => {
-  // A part-uploaded share otherwise parses fine: header, metadata and the small chunks
-  // all check out, and only the state chunk fails, much later and much less clearly.
+  // a part-uploaded share otherwise parses until the state chunk fails, much later and
+  // much less clearly
   const bytes = await packSaveFile({
     meta: { world: WORLDS.get(LEGACY_WORLD_ID) },
     chunks: [
@@ -235,7 +231,7 @@ test('rejects a hostile chunk table rather than reading the wrong bytes', async 
       )
     )
     mutate(meta)
-    // Re-pack by hand so the table can say things packSaveFile would never write.
+    // re-pack by hand so the table can say things packSaveFile would never write
     const json = te.encode(JSON.stringify(meta))
     const out = new Uint8Array(HEADER_SIZE + json.length + 4096)
     out.set(bytes.subarray(0, HEADER_SIZE), 0)
@@ -246,8 +242,8 @@ test('rejects a hostile chunk table rather than reading the wrong bytes', async 
     return out
   }
 
-  // A negative offset is the nasty one: subarray() reads from the END of the buffer, so
-  // it silently succeeds and hands back unrelated bytes.
+  // a negative offset makes subarray() read from the end of the buffer, so it succeeds
+  // and hands back unrelated bytes
   for (const [name, mutate] of [
     ['negative offset', (m) => (m.chunks[0].offset = -1024)],
     ['string offset', (m) => (m.chunks[0].offset = '0')],
@@ -321,6 +317,39 @@ test('an unknown world id is refused outright', () => {
   )
 })
 
+// The whole reason worlds exist. Every ?share= link published before v2 is a bare state
+// with no world recorded, and those links are the Playable URL on Unified DB records that
+// get spot-checked months later. If shipping v2 moved v1's addresses, or resolved a v1
+// share onto v2 disks, every one of those links would boot the wrong machine under RAM
+// captured from another. So: v1's entry is pinned bytes, and shipping a new current world
+// must not touch it.
+test('shipping v2 leaves every published v1 share untouched', () => {
+  const v1 = WORLDS.get(LEGACY_WORLD_ID)
+  assert.equal(v1.disks.hda.url, `https://${CDN_HOST}/v1/hda.img`)
+  assert.equal(v1.disks.hdb.url, `https://${CDN_HOST}/v1/hdb.img`)
+  assert.equal(v1.initialState.url, `https://${CDN_HOST}/v1/state.bin.zst`)
+  assert.equal(v1.disks.hda.size, 314572800)
+  // a bare v1 state still resolves to v1, not to whatever is current
+  assert.equal(resolveWorld(null, prod).id, LEGACY_WORLD_ID)
+  assert.equal(resolveWorld(null, prod).disks.hda.url, v1.disks.hda.url)
+})
+
+test('v2 is registered on its own prefix and is the current world', () => {
+  const v2 = WORLDS.get(V2_WORLD_ID)
+  assert.equal(v2.disks.hda.url, `https://${CDN_HOST}/v2/hda.img`)
+  assert.equal(v2.disks.hdb.url, `https://${CDN_HOST}/v2/hdb.img`)
+  assert.equal(v2.initialState.url, `https://${CDN_HOST}/v2/state.bin.zst`)
+  assert.equal(v2.disks.hda.size, 1073741824)
+  assert.equal(v2.disks.hdb.size, 4294967296)
+  // restore_state is unforgiving about these: they are part of the snapshot's identity
+  assert.equal(v2.memory, 128 * 1024 * 1024)
+  assert.equal(v2.vgaMemory, 32 * 1024 * 1024)
+  assert.equal(v2.uart1, false)
+  assert.notEqual(V2_WORLD_ID, LEGACY_WORLD_ID)
+  // a save that records v2 comes back as v2 rather than being coerced to the legacy world
+  assert.equal(resolveWorld({ id: V2_WORLD_ID }, prod).id, V2_WORLD_ID)
+})
+
 const unregistered = (disks, over = {}) => ({
   id: 'win98-cp99-v9',
   memory: 128 * 1024 * 1024,
@@ -344,7 +373,7 @@ test('refuses disks from a host we do not serve', () => {
 
 test('refuses plain http and localhost in production', () => {
   for (const url of [
-    'http://cdn.like-its-1999.jer.app/v1/hda.img',
+    `http://${CDN_HOST}/v1/hda.img`,
     'http://localhost:9999/hda.img',
   ])
     assert.throws(
@@ -359,7 +388,7 @@ test('refuses an unversioned CDN path', () => {
       resolveWorld(
         unregistered({
           hda: {
-            url: 'https://cdn.like-its-1999.jer.app/hda.img',
+            url: `https://${CDN_HOST}/hda.img`,
             size: 314572800,
           },
         }),
@@ -373,7 +402,7 @@ test('accepts a versioned CDN prefix and our own /vm/ path', () => {
   const world = resolveWorld(
     unregistered({
       hda: {
-        url: 'https://cdn.like-its-1999.jer.app/v2/hda.img',
+        url: `https://${CDN_HOST}/v2/hda.img`,
         size: 314572800,
       },
       hdb: { url: '/vm/hdb.img', size: 1073741824 },
@@ -421,7 +450,7 @@ test('refuses unknown disk keys and out-of-range numbers', () => {
 test('refuses a path that needs normalising, in dev too', () => {
   for (const url of [
     '/vm/../../etc/passwd',
-    'https://cdn.like-its-1999.jer.app/v1/../hda.img',
+    `https://${CDN_HOST}/v1/../hda.img`,
   ])
     for (const env of [prod, dev])
       assert.throws(
@@ -432,8 +461,7 @@ test('refuses a path that needs normalising, in dev too', () => {
 })
 
 test('assets may only come from our own /vm/ or the CDN, dev included', () => {
-  // There is no dev-only escape hatch: a save file names these urls and the emulator
-  // mounts them, so the rule is the same everywhere.
+  // a save file names these urls and the emulator mounts them, so dev gets no exception
   for (const url of [
     'http://127.0.0.1:8080/hda.img',
     'https://evil.example/hda.img',
@@ -467,7 +495,7 @@ test('v86 config carries COM2 only when the world has it', () => {
 
 // --- dev worlds: rapid image iteration ------------------------------------------
 
-// Stub server: reports sizes/mtimes for whatever we say exists.
+// stub server: reports sizes and mtimes for whatever we say exists
 function stubFetch(assets) {
   return async (url, init) => {
     assert.equal(init?.method, 'HEAD')
@@ -498,12 +526,12 @@ test('a dev world takes its sizes from the server and fingerprints the image', a
   assert.equal(a.disks.hda.size, 314572800)
   assert.deepEqual(a.initialState, { url: '/vm/state.bin.zst' })
 
-  // Same bytes -> same id, so a reload keeps restoring the session.
+  // same bytes -> same id, so a reload keeps restoring the session
   const again = await currentWorld({}, { dev: true, fetch: fetchA })
   assert.equal(again.id, a.id)
 
-  // Rebuilt image (new mtime and size) -> new id, so the old save is stale rather
-  // than restored over disks that no longer match it.
+  // rebuilt image -> new id, so the old save is stale rather than restored over disks
+  // that no longer match it
   const rebuilt = await currentWorld(
     {},
     {
@@ -524,15 +552,14 @@ test('a dev world with no shipped snapshot cold boots', async () => {
 })
 
 test('a snapshot older than the disks is ignored, not restored', async () => {
-  // Mid-rebuild: new disks, snapshot not recaptured yet. Restoring it would paint the
-  // old build's RAM over the new image.
+  // mid-rebuild: new disks, snapshot not recaptured, so restoring it would put the old
+  // build's ram over the new image
   const assets = imageAt('Thu, 30 Jul 2026 12:00:00 GMT')
   assets['state.bin.zst'].modified = 'Wed, 08 Jul 2026 21:58:14 GMT'
   const stale = await currentWorld({}, { dev: true, fetch: stubFetch(assets) })
   assert.equal(stale.snapshotIsStale, true)
   assert.equal(stale.initialState, null)
 
-  // Recapture it and the instant boot comes back.
   assets['state.bin.zst'].modified = 'Thu, 30 Jul 2026 12:30:00 GMT'
   const fresh = await currentWorld({}, { dev: true, fetch: stubFetch(assets) })
   assert.equal(fresh.snapshotIsStale, false)
@@ -550,13 +577,13 @@ test('a dev world falls back to registry sizes when HEAD is unsupported', async 
     }
   )
   assert.equal(world.id, 'dev:unknown')
-  assert.equal(world.disks.hda.size, WORLDS.get(LEGACY_WORLD_ID).disks.hda.size)
+  // the fallback is the *current* world's registry entry, which moved to v2
+  assert.equal(world.disks.hda.size, WORLDS.get(V2_WORLD_ID).disks.hda.size)
   assert.equal(world.initialState, null)
 })
 
 test('a dev world id in a file is refused, not trusted', async () => {
-  // The fingerprint only means anything if we measure it ourselves. Honouring a dev id
-  // a file claims is how an old save gets restored over a rebuilt image.
+  // the fingerprint only means anything if we measure it ourselves
   const desc = {
     id: 'dev:deadbeef1234',
     memory: 128 * 1024 * 1024,
@@ -566,7 +593,7 @@ test('a dev world id in a file is refused, not trusted', async () => {
   for (const env of [prod, dev])
     assert.throws(() => resolveWorld(desc, env), /can only be opened/)
 
-  // And an explicit ?world= for a dev id is only honoured when the image still matches.
+  // an explicit ?world= for a dev id is only honoured when the image still matches
   const assets = imageAt('Wed, 29 Jul 2026 10:00:00 GMT')
   const minted = await currentWorld({}, { dev: true, fetch: stubFetch(assets) })
   const opts = { ...dev, fetch: stubFetch(assets) }
@@ -578,9 +605,8 @@ test('a dev world id in a file is refused, not trusted', async () => {
 })
 
 test('registered worlds are pinned to versioned CDN urls', () => {
-  // The expensive failure this guards: if a registered world derived its URLs from the
-  // current build's base, shipping a v2 image would silently repoint every published v1
-  // share link at v2 disks.
+  // urls derived from the current build's base would repoint every published v1 share
+  // link at v2 disks the day a v2 image ships
   for (const [id, world] of WORLDS) {
     for (const [key, disk] of Object.entries(world.disks))
       assert.match(
@@ -597,7 +623,7 @@ test('registered worlds are pinned to versioned CDN urls', () => {
 })
 
 test('world ids from files must be boring', () => {
-  // These end up in IndexedDB keys, URLs and status text.
+  // these end up in indexeddb keys, urls and status text
   for (const bad of [
     '__proto__',
     'a/b',
@@ -613,15 +639,14 @@ test('world ids from files must be boring', () => {
 })
 
 test('a prototype-chain id cannot masquerade as a registered world', () => {
-  // WORLDS is a Map, so 'toString' is simply not a member. With a plain object it would
-  // have returned Function.prototype.toString, sailed past validation, and blown up at
-  // boot with no error shown.
+  // WORLDS is a Map: with a plain object these would return Function.prototype members
+  // and sail past validation
   for (const id of ['toString', 'constructor', '__proto__'])
     assert.throws(() => resolveWorld(id, prod), /unknown world|not a valid/)
 })
 
 test('the descriptor we write is the descriptor we accept', () => {
-  // worldDescriptor and validateWorld are mirrors; a round trip catches them drifting.
+  // worldDescriptor and validateWorld mirror each other; a round trip catches them drifting
   const world = WORLDS.get(LEGACY_WORLD_ID)
   const round = validateWorld(worldDescriptor(world), prod)
   assert.equal(round.id, world.id)
@@ -639,6 +664,7 @@ test('parses the dev mode params', () => {
     nosave: false,
     world: null,
     share: null,
+    vmbase: null,
   })
   const p = readModeParams(
     '?nosave&world=dev:abc&vm=/vm-cp02/&share=https://x/y.gz'
@@ -653,14 +679,13 @@ test('parses the dev mode params', () => {
 // --- reading a remote save's metadata only ---------------------------------------
 
 test('a remote container is probed for metadata without pulling the body', async () => {
-  // The point of the container's uncompressed header: a reviewer can see which world a
-  // submitted machine belongs to, and what it carries, from one small read rather than 65 MB
-  // of RAM image. The 'r' in Range is the sender's promise, so this counts what it gets.
+  // the container header is uncompressed so a reviewer can read which world a submitted
+  // machine belongs to without pulling 65 MB of ram image
   const bytes = await packSaveFile({
     meta: { world: { id: 'win98-checkpoint03-v1' }, note: 'x'.repeat(4096) },
     chunks: [
-      // Raw and incompressible, so "we did not download the body" means something: a
-      // gzipped chunk of zeros would shrink to nothing and prove nothing.
+      // raw and incompressible: a gzipped chunk of zeros would shrink to nothing and
+      // make the byte count meaningless
       {
         id: 'state',
         bytes: Uint8Array.from({ length: 300_000 }, (_, i) => (i * 37) & 0xff),
@@ -684,7 +709,7 @@ test('a remote container is probed for metadata without pulling the body', async
 
   const probed = await probeSaveFileMeta('https://example.test/m.99sv', {
     fetch,
-    initialBytes: 1024, // deliberately smaller than the metadata, to force the second read
+    initialBytes: 1024, // smaller than the metadata, to force the second read
   })
   assert.equal(probed.meta.world.id, 'win98-checkpoint03-v1')
   assert.deepEqual(
@@ -699,8 +724,6 @@ test('a remote container is probed for metadata without pulling the body', async
 })
 
 test('a probe refuses an implausible metadata length instead of downloading it', async () => {
-  // Four corrupt bytes must not turn a header read into a full download, which is the one
-  // thing this function exists to avoid.
   const bytes = await packSaveFile({
     chunks: [{ id: 'state', bytes: fakeState(64) }],
   })
@@ -730,9 +753,8 @@ test('a probe reports a legacy artifact as having no container metadata', async 
 })
 
 test('a descriptor cannot lie about how big a disk is', async () => {
-  // The last way a save file could still steer the emulator wrong: claim an in-range size
-  // for a real object, and v86 spends the session reading past the end of it. Only checked
-  // for a world this build does not know, since a registered one pins its own sizes.
+  // an in-range but wrong size has v86 reading past the end of a real object all session;
+  // only checked for a world this build does not know, since a registered one pins its sizes
   const desc = {
     id: 'someone-elses-world',
     memory: 128 * 1024 * 1024,
@@ -748,7 +770,7 @@ test('a descriptor cannot lie about how big a disk is', async () => {
     ok: true,
     headers: new Map([['content-length', String(size)]]),
   })
-  // Map has .get, which is all probeAsset uses.
+  // a Map has .get, which is all probeAsset uses
   await assert.rejects(
     () => verifyDiskSizes(world, { fetch: head(999) }),
     /but .* is 999/
@@ -759,7 +781,6 @@ test('a descriptor cannot lie about how big a disk is', async () => {
     'and the honest case passes through'
   )
 
-  // A registered world is not probed at all, however wrong the file was.
   const registered = resolveWorld(LEGACY_WORLD_ID, { dev: false })
   let called = 0
   await verifyDiskSizes(registered, {
@@ -769,4 +790,82 @@ test('a descriptor cannot lie about how big a disk is', async () => {
     },
   })
   assert.equal(called, 0)
+})
+
+test('?vmbase points the dev world at another local image dir, dev only', async () => {
+  const seen = []
+  const fetch = async (url) => {
+    seen.push(url)
+    return {
+      ok: true,
+      headers: new Map([
+        ['etag', '"x"'],
+        ['last-modified', 'Mon, 04 Aug 2026 00:00:00 GMT'],
+        [
+          'content-length',
+          url.endsWith('hdb.img') ? '4294967296' : '314572800',
+        ],
+      ]),
+    }
+  }
+  const world = await currentWorld(
+    { vmbase: '/vm-v2' },
+    { dev: true, fetch, origin: 'http://localhost:5173' }
+  )
+  assert.equal(world.disks.hdb.url, '/vm-v2/hdb.img')
+  assert.equal(world.disks.hdb.size, 4294967296)
+  // no trailing slash supplied above, so it must have been added rather than producing
+  // '/vm-v2hdb.img'
+  assert.ok(
+    seen.every((u) => u.startsWith('/vm-v2/')),
+    seen.join(' ')
+  )
+
+  // ignored outside dev: production must never take a fetch base from the url
+  const prod = await currentWorld(
+    { vmbase: '/vm-v2' },
+    { dev: false, fetch, origin: 'https://example.com' }
+  )
+  assert.ok(prod.disks.hda.url.startsWith(`https://${CDN_HOST}/v2/`))
+
+  await assert.rejects(
+    () =>
+      currentWorld(
+        { vmbase: '/vm/../etc' },
+        { dev: true, fetch, origin: 'http://localhost:5173' }
+      ),
+    /vmbase/
+  )
+  await assert.rejects(
+    () =>
+      currentWorld(
+        { vmbase: '/elsewhere' },
+        { dev: true, fetch, origin: 'http://localhost:5173' }
+      ),
+    /vmbase/
+  )
+})
+
+test("a dev server's HTML fallback is not mistaken for a snapshot", async () => {
+  // vite serves 200 + text/html for a missing path under /vm*/ rather than 404
+  const fetch = async (url) => ({
+    ok: true,
+    headers: new Map(
+      url.endsWith('state.bin.zst')
+        ? [['content-type', 'text/html']]
+        : [
+            ['content-type', 'application/octet-stream'],
+            ['etag', '"d"'],
+            ['last-modified', 'Mon, 04 Aug 2026 00:00:00 GMT'],
+            ['content-length', '314572800'],
+          ]
+    ),
+  })
+  const world = await currentWorld(
+    { vmbase: '/vm-v2/' },
+    { dev: true, fetch, origin: ORIGIN }
+  )
+  assert.equal(world.initialState, null, 'must cold boot')
+  assert.equal(world.snapshotIsStale, false)
+  assert.ok(world.disks.hda.url.startsWith('/vm-v2/'))
 })

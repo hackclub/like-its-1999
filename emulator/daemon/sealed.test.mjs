@@ -50,7 +50,6 @@ test('every seal derives a different key, so nothing is reused', async () => {
   assert.notEqual(a.seal.epk, b.seal.epk, 'fresh ephemeral key each time')
   assert.notEqual(a.seal.iv, b.seal.iv)
   assert.notDeepEqual(a.body, b.body, 'identical input, different ciphertext')
-  // Both still open.
   assert.deepEqual(await unseal(a, priv), LOG)
   assert.deepEqual(await unseal(b, priv), LOG)
 })
@@ -123,9 +122,8 @@ test('exported keys survive a trip through text', async () => {
   )
 })
 
-// The seam that was broken: seal() named the public part one thing and the container's chunk
-// metadata read another, so every sealed chunk went to disk undecryptable. Nothing that
-// tested seal alone, or the container alone, could see it — only the whole path can.
+// seal() and the container's chunk metadata have to name the sealed parts the same way,
+// and neither side's own tests can see a mismatch
 test('a sealed log survives a real save container and comes back out', async () => {
   const { pub, priv } = await keys()
   const { packSaveFile, readSaveFile } = await import('../savefile.js')
@@ -140,7 +138,7 @@ test('a sealed log survives a real save container and comes back out', async () 
         bytes: sealed.body,
         codec: 'raw',
         hash: true,
-        // Exactly what persist.js writes, spelled the same way.
+        // exactly what persist.js writes, spelled the same way
         extra: { format: 'ndjson+gzip+sealed', seal: sealed.seal, sig: null },
       },
     ],

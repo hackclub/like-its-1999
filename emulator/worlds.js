@@ -1,52 +1,52 @@
-// Worlds: which base image + machine config a save belongs to.
+// a v86 state restores only against the exact disks and memory config it was captured
+// with, so the image is part of a save's identity; the emulator is built from the
+// resolved world rather than module constants, which is what lets a v1 share keep
+// booting against v1 disks after a v2 image ships
 //
-// A v86 state restores only against the exact disks and memory config it was captured
-// with, so "the image" is part of a save's identity. A world bundles that identity:
-// an id, the disk URLs and sizes, memory/vga sizes, whether COM2 exists, and the
-// shipped instant-boot snapshot. Saves record their world (see savefile.js) and the
-// emulator is built from the *resolved* world, not from module constants — which is
-// what lets a v1 share keep booting against v1 disks after a v2 image ships.
+// registered world ids and URLs must never be repurposed: published ?share= links are
+// the Playable URL of Unified DB records and get spot-checked long after submission, so
+// a rebuild is a new world at a new path prefix
 //
-// Two kinds of world:
+// dev world ids carry a content fingerprint, since local images get rebuilt constantly
+// at the same path; when the bytes change the id changes, so the previous save is
+// recognised as stale instead of restored over disks that no longer match it
 //
-//   - Registered (production). A fixed id string, forever. Published `?share=` links
-//     are the Playable URL of Unified DB records and get spot-checked long after
-//     submission, so these ids and URLs must never be repurposed. A rebuild is a NEW
-//     world at a NEW path prefix; the old one stays exactly where it is.
-//   - Dev (local only). Minted at runtime with a content fingerprint in the id, since
-//     local images get rebuilt constantly at the same path. When the bytes change the
-//     id changes, so the previous save is recognised as stale instead of being
-//     restored over disks that no longer match it. Disk sizes and the presence of the
-//     shipped snapshot are probed rather than hardcoded, so a rebuild of a different
-//     size needs no code edit.
-//
-// A save file is untrusted input, so an embedded world descriptor is only honoured if
-// its assets pass the allowlist below — a save must never be able to point the
-// emulator at an arbitrary host.
+// a save file is untrusted input, so an embedded world descriptor is honoured only if
+// its assets pass the allowlist below
 
 import { sha256hex } from './savefile.js'
 
 const MiB = 1024 * 1024
 
-// Every published v1 share is a bare state with no world recorded, so "no world" maps
-// here.
+// every published v1 share is a bare state with no world recorded, so "no world" maps here
 export const LEGACY_WORLD_ID = 'win98-checkpoint03-v1'
 
-export const CDN_HOST = 'cdn.like-its-1999.jer.app'
+// v2: the same Windows 98 SE with a much wider toolkit (VB6, Visual C++ 6, Delphi 5,
+// Inform 6.21, MinGW, Python, Tcl/Tk, NASM and the rest) on a 1 GiB C: and a 4 GiB D:
+export const V2_WORLD_ID = 'win98-checkpoint24-v2'
 
-// Where a fresh local image is served from. Only ever used for *dev* worlds: a
-// registered world must never derive its URLs from an env var, or the day this moves to
-// /v2/ every published v1 share would mount v2 disks under v1 RAM.
+// Cloudflare R2 behind a custom domain. Both worlds moved here on 2026-08-17, and the
+// reason was range requests rather than tidiness: the previous host answered the first
+// range against a cold object with 200 and the whole body, so one 256 KiB chunk read cost
+// a full 1 GiB on v1 and would have cost 4 GiB on v2. R2 serves ranges straight from
+// object storage (cf-cache-status: DYNAMIC) and returns 206 with exactly the bytes asked
+// for, cold or warm.
+//
+// v1's bytes were mirrored from the old host, not re-uploaded from a local checkpoint, and
+// verified identical: published ?share= links must keep getting the bytes they always got.
+export const CDN_HOST = 'like-its-1999.hackclub-assets.com'
+
+// dev worlds only: a registered world must never derive its URLs from an env var, or the
+// day this moves to /v2/ every published v1 share would mount v2 disks under v1 RAM
 const DEV_BASE = import.meta.env?.VITE_VM_BASE || '/vm/'
 
-// Registered worlds are PINNED, absolutely and forever. Published `?share=` links are
-// the Playable URL of Unified DB records and get spot-checked long after submission, so
-// v1's bytes must stay reachable at v1's addresses no matter what the current build
-// points at. Adding a v2 world means adding an entry here, never editing this one.
+// pinned forever: v1's bytes must stay reachable at v1's addresses no matter what the
+// current build points at, so adding a v2 world means adding an entry here, never
+// editing this one
 //
-// A Map, not an object: world ids come out of untrusted save files, and `WORLDS[id]`
-// with id 'toString' or 'constructor' would hand back a function from the prototype
-// chain and sail straight past validation.
+// a Map because world ids come out of untrusted save files, and WORLDS[id] with id
+// 'toString' or 'constructor' would hand back a function from the prototype chain and
+// sail straight past validation
 export const WORLDS = new Map([
   [
     LEGACY_WORLD_ID,
@@ -71,12 +71,35 @@ export const WORLDS = new Map([
       initialState: { url: `https://${CDN_HOST}/v1/state.bin.zst` },
     },
   ],
+  [
+    V2_WORLD_ID,
+    {
+      id: V2_WORLD_ID,
+      label: "Windows 98 SE — Like It's 1999 v2",
+      // identical machine to v1 on purpose: the disks got bigger, the hardware did not
+      memory: 128 * MiB,
+      vgaMemory: 32 * MiB,
+      uart1: false,
+      disks: {
+        hda: {
+          url: `https://${CDN_HOST}/v2/hda.img`,
+          size: 1073741824,
+          chunkSize: 256 * 1024,
+        },
+        hdb: {
+          url: `https://${CDN_HOST}/v2/hdb.img`,
+          size: 4294967296,
+          chunkSize: 256 * 1024,
+        },
+      },
+      initialState: { url: `https://${CDN_HOST}/v2/state.bin.zst` },
+    },
+  ],
 ])
 
-const CURRENT_WORLD_ID = LEGACY_WORLD_ID
+const CURRENT_WORLD_ID = V2_WORLD_ID
 
-// Locally there is no CDN, so rewrite a registered world's pinned URLs onto the dev
-// base. Dev only: in production the pinned URLs are the whole point.
+// locally there is no CDN, so rewrite a registered world's pinned URLs onto the dev base
 function forDev(world) {
   const swap = (url) => DEV_BASE + url.slice(url.lastIndexOf('/') + 1)
   return {
@@ -93,12 +116,9 @@ function forDev(world) {
   }
 }
 
-// World ids land in IndexedDB keys, URLs and status text, and arrive from untrusted
-// files. Keep them boring.
+// world ids land in IndexedDB keys, URLs and status text, and arrive from untrusted files
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/
 export const isValidWorldId = (id) => typeof id === 'string' && ID_RE.test(id)
-
-// --- allowlist ------------------------------------------------------------------
 
 const DISK_KEYS = new Set(['hda', 'hdb', 'hdc', 'fda'])
 const LIMITS = {
@@ -117,9 +137,9 @@ function envDefaults(opts = {}) {
   }
 }
 
-// Assets may live only in the two places we put them: the app's own /vm/ path, or a
-// versioned prefix on the CDN. Nothing else, in dev either — a save file names these
-// URLs and the emulator mounts them.
+// assets may live only where we put them: the app's own /vm/ path, or a versioned prefix
+// on the CDN, and nothing else in dev either; a save file names these URLs and the
+// emulator mounts them
 function assetAllowed(url, env) {
   let u
   try {
@@ -127,9 +147,9 @@ function assetAllowed(url, env) {
   } catch {
     return false
   }
-  // The checks below read the *normalised* path, so traversal can't sneak past them —
-  // but a url that needed normalising is never something we wrote, so refuse it
-  // outright rather than reasoning about what it collapsed to.
+  // the checks below read the normalised path, so traversal can't sneak past them, but a
+  // url that needed normalising is never one we wrote, so refuse it outright rather than
+  // reasoning about what it collapsed to
   if (url.includes('..')) return false
   if (u.origin === env.origin && u.pathname.startsWith('/vm')) return true
   return (
@@ -141,7 +161,7 @@ function assetAllowed(url, env) {
 
 const inRange = (n, [lo, hi]) => Number.isFinite(n) && n >= lo && n <= hi
 
-// Validate a world descriptor that came out of a save file. Throws with a reason.
+// descriptors arrive from untrusted save files; throws with a reason
 export function validateWorld(desc, opts = {}) {
   const env = envDefaults(opts)
   const where = desc?.id
@@ -197,8 +217,7 @@ export function validateWorld(desc, opts = {}) {
   }
 }
 
-// What gets written into a save file: the mirror image of validateWorld above, kept
-// beside it on purpose so the two can't drift apart.
+// what gets written into a save file, kept beside validateWorld so the two can't drift
 const DESCRIPTOR_KEYS = ['id', 'label', 'memory', 'vgaMemory', 'uart1', 'disks']
 
 export function worldDescriptor(world) {
@@ -209,16 +228,12 @@ export function worldDescriptor(world) {
   return desc
 }
 
-// Resolve the world a save should boot in.
-//   - no descriptor (legacy artifact) -> the legacy world
-//   - a registered id -> the registry entry WINS over whatever the file says, so a
-//     moved CDN prefix is a one-line fix here instead of a rewrite of files in the wild
-//   - anything else -> validated against the allowlist, or refused
-// Can this world be found again after a page reload, from its id alone? True for a
-// registered world (the registry has it) and for the current local image (it can be
-// re-measured). False for a validated descriptor out of a save file: nothing but that file
-// knows what it means, so storing a machine under it would put it somewhere no later load
-// could reach. Never written into a save — worldDescriptor copies only its own key list.
+// a registered id wins over whatever the file says, so a moved CDN prefix is a one-line
+// fix here instead of a rewrite of files in the wild
+//
+// resolvable: can this world be found again from its id alone after a reload? false for a
+// descriptor out of a save file, since nothing but that file knows what it means, so
+// storing a machine under it would put it somewhere no later load could reach
 export function resolveWorld(desc, opts = {}) {
   const env = envDefaults(opts)
   const registered = (id) => {
@@ -235,9 +250,9 @@ export function resolveWorld(desc, opts = {}) {
     throw new Error(
       `unknown world "${String(desc).slice(0, 64)}" (this build has no such image)`
     )
-  // A dev world's id is a fingerprint of the image bytes, so trusting one a file hands
-  // us would reintroduce exactly what the fingerprint prevents: an old save restored
-  // over a rebuilt image. Only currentWorld() may mint dev worlds, by measuring.
+  // a dev world's id fingerprints the image bytes, so trusting one a file hands us would
+  // reintroduce exactly what the fingerprint prevents: an old save restored over a
+  // rebuilt image. only currentWorld() may mint dev worlds, by measuring
   if (isDevWorldId(id))
     throw new Error(
       `"${String(id).slice(0, 64)}" is a local build's world — it can only be opened ` +
@@ -246,16 +261,13 @@ export function resolveWorld(desc, opts = {}) {
   return { ...validateWorld(desc, opts), resolvable: false }
 }
 
-// Check a world's disk sizes against the objects themselves.
+// only worth doing for a world out of a save file: registered sizes are pinned beside
+// their URLs and dev sizes are measured, but an unregistered descriptor can claim any
+// in-range number for a real object, and v86 would then read past the end of it for the
+// rest of the session
 //
-// Only worth doing for a world that came out of a save file. A registered world's sizes are
-// pinned in the registry beside its URLs, and a dev world measures them, so neither can be
-// wrong; an unregistered descriptor can claim any in-range number for a real object, and v86
-// would then read past the end of it for the rest of the session. Cheap, because it is one
-// HEAD per disk and only on the rare path.
-//
-// A host that will not answer HEAD is not a reason to refuse: `probeAsset` returns null and
-// the claim stands, which is the same degradation the dev fingerprint already accepts.
+// a host that will not answer HEAD leaves probeAsset null and the claim stands, the same
+// degradation the dev fingerprint already accepts
 export async function verifyDiskSizes(world, opts = {}) {
   if (world.resolvable !== false) return world
   const doFetch = opts.fetch || globalThis.fetch
@@ -273,8 +285,7 @@ export async function verifyDiskSizes(world, opts = {}) {
   return world
 }
 
-// The V86 constructor options a world implies. Everything else (bios, screen, wasm)
-// is the page's business.
+// everything else (bios, screen, wasm) is the page's business
 export function worldToV86Config(world, { initialState } = {}) {
   const config = {
     memory_size: world.memory,
@@ -287,20 +298,20 @@ export function worldToV86Config(world, { initialState } = {}) {
       async: true,
       fixed_chunk_size: d.chunkSize,
     }
-  // v86 only creates COM2 when asked, and restore_state touches uart1 state only if
-  // the device exists — so this flag is part of the world's identity, not a detail.
+  // v86 only creates COM2 when asked, and restore_state touches uart1 state only if the
+  // device exists, so this flag is part of the world's identity
   if (world.uart1) config.uart1 = true
   // v86 writes its own bookkeeping into the image objects it's handed, so give it a copy
-  // rather than the world's own initialState.
   if (initialState) config.initial_state = { ...initialState }
   return config
 }
 
-// --- URL-driven dev modes -------------------------------------------------------
-
-// ?fresh=1   cold boot: ignore the saved session and the shipped snapshot
-// ?nosave=1  boot normally but never write to browser storage (Export still works)
-// ?world=id  boot a specific world
+// ?fresh=1     cold boot: ignore the saved session and the shipped snapshot
+// ?nosave=1    boot normally but never write to browser storage (Export still works)
+// ?world=id    boot a specific world
+// ?vmbase=/p/  dev only: build the dev world from a different local image directory, so
+//              two locally-served images can be booted side by side without restarting
+//              Vite to change VITE_VM_BASE
 export function readModeParams(search) {
   const q = new URLSearchParams(
     search ?? (typeof location !== 'undefined' ? location.search : '')
@@ -311,18 +322,32 @@ export function readModeParams(search) {
     nosave: flag('nosave'),
     world: q.get('world') || null,
     share: q.get('share') || null,
+    vmbase: q.get('vmbase') || null,
   }
 }
 
-// --- dev worlds -----------------------------------------------------------------
+// a URL-supplied fetch base: dev only, same shape as the bases we write ourselves, and it
+// still has to satisfy assetAllowed downstream like every other asset URL
+function devBase(params, env) {
+  const raw = params?.vmbase
+  if (!raw || !env.dev) return DEV_BASE
+  const base = raw.endsWith('/') ? raw : raw + '/'
+  if (!base.startsWith('/vm') || base.includes('..'))
+    throw new Error('vmbase must be a local path under /vm')
+  return base
+}
 
-// Identify a local image by what the server says about its bytes. Any rebuild changes
-// size or mtime, so the id changes with it and stale saves are caught automatically —
-// no constant to remember to bump, which is the failure mode of the old IMAGE_ID.
+// identify a local image by what the server says about its bytes: any rebuild changes size
+// or mtime, so the id changes with it and there is no constant to remember to bump
 async function probeAsset(url, doFetch) {
   try {
     const resp = await doFetch(url, { method: 'HEAD' })
     if (!resp.ok) return null
+    // vite answers a missing path under /vm*/ with 200 and an HTML body, not a 404, so ok
+    // alone would let a missing state.bin.zst read as a snapshot that exists and then get
+    // mounted as RAM. an image or a zstd snapshot is never text/html
+    const type = resp.headers.get('content-type') || ''
+    if (type.includes('text/html')) return null
     return {
       etag: resp.headers.get('etag') || '',
       modified: resp.headers.get('last-modified') || '',
@@ -336,17 +361,15 @@ async function probeAsset(url, doFetch) {
 export const isDevWorldId = (id) =>
   typeof id === 'string' && id.startsWith('dev:')
 
-// Build the dev world for a base URL: sizes and the presence of the shipped snapshot
-// come from the server, so a freshly rebuilt (or differently sized, or snapshot-less)
-// image just works.
+// sizes and the presence of the shipped snapshot come from the server, so a freshly
+// rebuilt (or differently sized, or snapshot-less) image just works
 async function makeDevWorld(base, opts = {}) {
   const doFetch = opts.fetch || globalThis.fetch
   const template = WORLDS.get(CURRENT_WORLD_ID)
   const diskKeys = Object.keys(template.disks)
   const stateUrl = base + 'state.bin.zst'
 
-  // Probe in parallel: this is on the critical path of every local page load, for the
-  // feature whose whole point is a fast rebuild loop.
+  // in parallel: this is on the critical path of every local page load
   const [stateProbe, ...diskProbeList] = await Promise.all([
     probeAsset(stateUrl, doFetch),
     ...diskKeys.map((key) => probeAsset(base + key + '.img', doFetch)),
@@ -371,11 +394,9 @@ async function makeDevWorld(base, opts = {}) {
 
   if (stateProbe) marks.push(`state:${stateProbe.etag}${stateProbe.modified}`)
 
-  // A snapshot older than the disks it sits next to is a *stale* instant-boot image:
-  // restoring it would paint the previous build's RAM over the disk you just rebuilt,
-  // which is the same silent corruption the fingerprint exists to prevent. Mid-loop
-  // (disks rebuilt, snapshot not recaptured yet) this is the normal state of things, so
-  // cold boot instead. Only skip it when we can positively tell it's older.
+  // restoring a snapshot older than the disks beside it would paint the previous build's
+  // RAM over the disk you just rebuilt. mid-loop (disks rebuilt, snapshot not recaptured
+  // yet) that is normal, so cold boot instead, and only when we can positively tell
   const at = (probe) => {
     const t = probe?.modified ? Date.parse(probe.modified) : NaN
     return Number.isNaN(t) ? null : t
@@ -390,9 +411,8 @@ async function makeDevWorld(base, opts = {}) {
   const snapshotIsStale =
     stateAt != null && newestDiskAt != null && stateAt < newestDiskAt
 
-  // An explicit revision wins; otherwise fingerprint what the server reported. If the
-  // server answered nothing at all (no HEAD support) the fingerprint degrades to
-  // 'unknown' and staleness can't be detected — dev only, and worth a warning.
+  // if the server answered nothing at all (no HEAD support) the fingerprint degrades to
+  // 'unknown' and staleness can't be detected
   const rev =
     import.meta.env?.VITE_VM_REV ||
     (marks.some((m) => !m.endsWith('?'))
@@ -409,7 +429,6 @@ async function makeDevWorld(base, opts = {}) {
     vgaMemory: template.vgaMemory,
     uart1: template.uart1,
     disks,
-    // No snapshot on disk, or one older than the disks: cold boot either way.
     initialState: stateProbe && !snapshotIsStale ? { url: stateUrl } : null,
     snapshotIsStale,
     dev: true,
@@ -417,19 +436,16 @@ async function makeDevWorld(base, opts = {}) {
   }
 }
 
-// The world this page should boot: the one ?world= names, else this build's own.
-//
-// A dev id is honoured only when the image on disk still fingerprints to it. Measuring
+// a dev id is honoured only when the image on disk still fingerprints to it; measuring
 // rather than taking the id's word for it is what stops a rebuilt image being restored
-// into, and it's why this is the single entry point for "which world am I" — a caller
-// that could bypass the measurement would reintroduce the hole.
+// into, so this stays the single entry point for "which world am I"
 export async function currentWorld(params = {}, opts = {}) {
   const env = envDefaults(opts)
   const forHere = (world) => ({
     ...(env.dev ? forDev(world) : world),
     resolvable: true,
   })
-  const mint = () => makeDevWorld(DEV_BASE, opts)
+  const mint = () => makeDevWorld(devBase(params, env), opts)
 
   if (!params.world)
     return env.dev ? mint() : forHere(WORLDS.get(CURRENT_WORLD_ID))

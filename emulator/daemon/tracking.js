@@ -1,25 +1,24 @@
-// The tracking log: what the machine was doing, recorded so hours can be worked out later.
+// the tracking log: what the machine was doing, recorded so hours can be worked out later
 //
-// **This deliberately computes no hours.** It records spans, input counts and gaps with
-// enough fidelity that any policy (idle timeout, coding versus asset attribution, the 25%
-// asset cap) can be applied afterwards without re-collecting anything. Deciding the policy
-// now would bake a guess into data we cannot re-gather.
+// it deliberately computes no hours. it records spans, input counts and gaps with enough
+// fidelity that any policy (idle timeout, coding versus asset attribution, the 25% asset
+// cap) can be applied afterwards, and deciding the policy now would bake a guess into data
+// we cannot re-gather
 //
-// Shape follows Hackatime: activity extends the current span rather than emitting a line
-// per tick, so a working session is a handful of lines rather than 17k a day. Concretely:
+// shape follows Hackatime: activity extends the current span rather than emitting a line per
+// tick, so a working session is a handful of lines rather than 17k a day
 //   - a line when the foreground window changes
 //   - at most one keepalive line every 2 minutes while input continues
 //   - a line when input stops for longer than the idle gap, closing the span
 //
-// Time is the host's throughout: a restored guest resumes with a stale RTC, so nothing the
-// guest says about time is recorded at all.
+// time is the host's throughout: a restored guest resumes with a stale RTC, so nothing the
+// guest says about time is recorded at all
 
 export const KEEPALIVE_MS = 2 * 60 * 1000
 export const IDLE_GAP_MS = 3 * 60 * 1000
 
-// A log line is an object with `ev` and `t`; everything else depends on the kind. Unknown
-// fields must be preserved by anything that reads these, the same rule as the container.
-
+// a log line is `ev` and `t` plus whatever the kind adds; unknown fields must be preserved
+// by anything that reads these, the same rule as the container
 export function createLog({
   instanceId,
   keepaliveMs = KEEPALIVE_MS,
@@ -30,14 +29,12 @@ export function createLog({
     keepaliveMs,
     idleGapMs,
     lines: [],
-    // Current foreground window, as last reported by the guest.
     win: null,
     exe: null,
-    // Input accumulated since the last line was written.
+    // input accumulated since the last line was written
     keys: 0,
     clicks: 0,
     wheel: 0,
-    // When the pending activity started and when we last saw any input.
     activeSince: null,
     lastInput: null,
     lastWrite: null,
@@ -51,13 +48,12 @@ const push = (log, line) => {
   return line
 }
 
-// Fold accumulated input into a line and reset the counters.
+// fold accumulated input into a line and reset the counters
 //
-// A span always ends at the last input we actually saw, never at the moment we happened to
-// flush. Ending at the flush time would credit the silence between the last keystroke and
-// a window change, an idle timeout or a save, which is time nobody worked. A lone
-// keystroke therefore records a zero-length span: honest, and a tally can credit a minimum
-// per span later if it wants to.
+// a span always ends at the last input we actually saw, never at the moment we happened to
+// flush, since ending at the flush would credit the silence between the last keystroke and a
+// window change, an idle timeout or a save. a lone keystroke therefore records a zero-length
+// span, and a tally can credit a minimum per span later if it wants to
 function flushActivity(log, reason) {
   if (log.activeSince === null) return null
   const t = Math.max(log.activeSince, log.lastInput ?? log.activeSince)
@@ -80,8 +76,7 @@ function flushActivity(log, reason) {
   return line
 }
 
-// The guest says the foreground window changed. Closes the current span so activity is
-// never attributed to the wrong application.
+// closes the current span so activity is never attributed to the wrong application
 export function onWindow(log, { exe, win }, t) {
   if (exe === log.exe && win === log.win) return null
   flushActivity(log, 'window')
@@ -90,10 +85,7 @@ export function onWindow(log, { exe, win }, t) {
   return push(log, { ev: 'win', t, exe, win })
 }
 
-// Input happened. Counts are cheap; a line is only written when a span opens, when the
-// keepalive falls due, or when the window changes.
 export function onInput(log, { keys = 0, clicks = 0, wheel = 0 } = {}, t) {
-  // A long enough silence closes the previous span before this input opens a new one.
   if (log.lastInput !== null && t - log.lastInput >= log.idleGapMs)
     flushActivity(log, 'idle')
 
@@ -103,23 +95,23 @@ export function onInput(log, { keys = 0, clicks = 0, wheel = 0 } = {}, t) {
   log.lastInput = t
   if (log.activeSince === null) log.activeSince = t
 
-  // Measured from the start of *this* span, not from the last line written: otherwise the
-  // first keystroke after a break is instantly "overdue" and emits an empty span.
+  // measured from the start of this span, not the last line written: otherwise the first
+  // keystroke after a break is instantly overdue and emits an empty span
   if (t - log.activeSince >= log.keepaliveMs)
     return flushActivity(log, 'keepalive')
   return null
 }
 
-// Time passed with no input. Closes a span once the gap is long enough, so the log records
-// where the user stopped rather than leaving an open span running to the next keystroke.
+// closes a span once the gap is long enough, so the log records where the user stopped
+// rather than leaving an open span running to the next keystroke
 export function onTick(log, t) {
   if (log.activeSince === null || log.lastInput === null) return null
   if (t - log.lastInput < log.idleGapMs) return null
   return flushActivity(log, 'idle')
 }
 
-// The page was hidden or shown. Recorded rather than acted on: whether a hidden tab counts
-// is a policy question for the tally, and a hidden tab barely executes the guest anyway.
+// recorded rather than acted on: whether a hidden tab counts is a policy question for the
+// tally, and a hidden tab barely executes the guest anyway
 export function onVisibility(log, visible, t) {
   if (visible === log.visible) return null
   flushActivity(log, 'visibility')
@@ -127,20 +119,19 @@ export function onVisibility(log, visible, t) {
   return push(log, { ev: 'mark', t, kind: visible ? 'shown' : 'hidden' })
 }
 
-// Agent connection state, so a gap in the log can be explained rather than guessed at.
+// agent connection state, so a gap in the log can be explained rather than guessed at
 export function onAgent(log, state, t, detail = '') {
   return push(log, { ev: 'agent', t, state, detail })
 }
 
-// Close whatever is open. Called before the log is written into a save, so a span that was
-// in progress is recorded rather than lost.
+// called before the log is written into a save, so a span in progress is recorded not lost
 export function seal(log) {
   flushActivity(log, 'seal')
   return log.lines
 }
 
-// NDJSON for the container. Sorted by time defensively: everything appends in order today,
-// but a later source of lines should not be able to produce a log that reads backwards.
+// sorted by time defensively: everything appends in order today, but a later source of lines
+// should not be able to produce a log that reads backwards
 export function toNdjson(log) {
   const sorted = [...log.lines].sort((a, b) => a.t - b.t)
   return (
@@ -156,8 +147,8 @@ export function fromNdjson(text) {
     .map((l) => JSON.parse(l))
 }
 
-// A rough shape of what was recorded, for the toolbar. Not an hours figure: it is the sum
-// of recorded active spans for this instance only, with no policy applied.
+// for the toolbar, and not an hours figure: the sum of recorded active spans for this
+// instance only, with no policy applied
 export function summarise(log) {
   const byExe = new Map()
   let activeMs = 0
@@ -175,10 +166,9 @@ export function summarise(log) {
   }
   return {
     activeMs,
-    // Written spans plus whatever is still accumulating in the open one. A summary that
-    // reads zero while someone is actively working is just wrong, and counting only the
-    // pending half (which is what clicks and wheel used to do) is wrong the other way:
-    // it reset to nothing every time a span was flushed.
+    // written spans plus whatever is still accumulating in the open one: counting only the
+    // written half reads zero while someone is working, and counting only the pending half
+    // resets to nothing every time a span is flushed
     keys: keys + log.keys,
     clicks: clicks + log.clicks,
     wheel: wheel + log.wheel,

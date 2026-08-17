@@ -1,7 +1,6 @@
 #include "frame.h"
 
-/* Local copies rather than <string.h>: this compiles freestanding with no CRT, and the
- * Win32 build has no memcpy to link against beyond the one we supply ourselves. */
+/* local copies rather than <string.h>: this compiles freestanding with no CRT */
 static void copy(u8 *dst, const u8 *src, int n) {
   int i;
   for (i = 0; i < n; i++) dst[i] = src[i];
@@ -12,9 +11,9 @@ static void move_down(u8 *buf, int from, int n) {
   for (i = 0; i < n; i++) buf[i] = buf[from + i];
 }
 
-/* --- CRC-32 (IEEE, the zlib polynomial) ----------------------------------------- */
-/* Computed on the fly rather than from a 1 KB table: the frames are small, the parent
- * is size-constrained, and this is not on any hot path. */
+/* --- CRC-32 (IEEE, the zlib polynomial) --- */
+/* on the fly rather than from a 1 KB table: the parent is size-constrained and the frames
+ * are small */
 u32 f_crc32(const u8 *b, int len) {
   u32 c = 0xffffffffUL;
   int i, k;
@@ -36,7 +35,7 @@ static void wr32(u8 *p, u32 v) {
   p[3] = (u8)((v >> 24) & 0xff);
 }
 
-/* --- decoding -------------------------------------------------------------------- */
+/* --- decoding --- */
 
 void f_dec_init(f_decoder *d) {
   d->len = 0;
@@ -56,9 +55,8 @@ int f_dec_push(f_decoder *d, const u8 *b, int n) {
   int room;
   if (n <= 0) return 0;
   compact(d);
-  /* Full, and the caller has already drained everything extractable, so what is here
-   * cannot become a frame: it is garbage that happens to start with a sync word. Drop it
-   * rather than wedge, and the stream resynchronises on the next real frame. */
+  /* full and already drained, so what is here cannot become a frame; drop it rather than
+   * wedge and let the stream resync on the next real one */
   if (d->len >= F_MAX_FRAME) {
     d->dropped += (u32)d->len;
     d->len = 0;
@@ -71,8 +69,8 @@ int f_dec_push(f_decoder *d, const u8 *b, int n) {
 }
 
 int f_dec_next(f_decoder *d, f_frame *out) {
-  /* Where an incomplete-but-plausible candidate began, so that waiting for it can be
-   * unwound if something later turns out to be a real frame. -1 means none seen. */
+  /* where an incomplete but plausible candidate began, so waiting on it can be unwound if
+   * something later turns out to be a real frame; -1 means none seen */
   int stalled = -1;
   u32 stalled_dropped = 0;
 
@@ -96,8 +94,8 @@ int f_dec_next(f_decoder *d, f_frame *out) {
     flags = p[3];
     len = rd32(p + 4);
 
-    /* Reject before waiting for bytes: a corrupt length must not make us block. Flags are
-     * all reserved, so any set bit means a frame from a future we do not understand. */
+    /* reject before waiting for bytes, so a corrupt length cannot block us; flags are all
+     * reserved, so any set bit is a frame we do not understand */
     if (type == 0 || flags != 0 || len > (u32)F_MAX_PAYLOAD) {
       d->start++;
       d->dropped++;
@@ -105,11 +103,10 @@ int f_dec_next(f_decoder *d, f_frame *out) {
     }
     total = F_HEADER + (int)len + F_TRAILER;
     if (avail < total) {
-      /* Incomplete, and possibly not a frame at all. A restored snapshot can leave a stale
-       * header in the UART claiming 64 KB, and waiting for it would swallow every frame
-       * behind it until that much traffic had arrived — on a link that is idle except for
-       * an announce every couple of seconds, that is minutes of being deaf. Keep looking
-       * past it, and only come back to it if nothing later proves to be real. */
+      /* Incomplete, and possibly not a frame at all: a restored snapshot can leave a stale
+       * header in the UART claiming 64 KB, and waiting for that much traffic on an
+       * otherwise idle link means minutes of deafness. Keep looking past it and come back
+       * only if nothing later proves real. */
       if (stalled < 0) {
         stalled = d->start;
         stalled_dropped = d->dropped;
@@ -131,7 +128,7 @@ int f_dec_next(f_decoder *d, f_frame *out) {
     out->payload = p + F_HEADER;
     out->len = (int)len;
     d->start += total;
-    return 1; /* a real frame: the stalled candidate, if any, was noise */
+    return 1; /* a real frame, so any stalled candidate was noise */
   }
   if (stalled >= 0) {
     d->start = stalled;
@@ -140,7 +137,7 @@ int f_dec_next(f_decoder *d, f_frame *out) {
   return 0;
 }
 
-/* --- fields ---------------------------------------------------------------------- */
+/* --- fields --- */
 
 int f_fields(const u8 *payload, int len, f_field *out, int max) {
   int count, at, i, kept = 0;
@@ -160,7 +157,7 @@ int f_fields(const u8 *payload, int len, f_field *out, int max) {
     }
     at += flen;
   }
-  /* Trailing bytes mean we misread the structure. */
+  /* trailing bytes mean we misread the structure */
   if (at != len) return -1;
   return kept;
 }
@@ -188,9 +185,8 @@ int f_field_uint(const f_field *f, u32 *out) {
   for (i = 0; i < f->len; i++) {
     u8 c = f->p[i];
     if (c < '0' || c > '9') return 0;
-    /* Both halves matter. The multiply overflows above 429496729, and at exactly that
-     * value it depends on the digit: 4294967296 wrapped to 0 and was accepted as a
-     * perfectly good zero, which is the worst possible way to fail a length check. */
+    /* both halves matter: the multiply overflows above 429496729, and at exactly that
+     * value it depends on the digit, since 4294967296 wraps to a valid-looking 0 */
     if (v > 429496729UL || (v == 429496729UL && c > '5')) return 0;
     v = v * 10 + (u32)(c - '0');
   }
@@ -198,7 +194,7 @@ int f_field_uint(const f_field *f, u32 *out) {
   return 1;
 }
 
-/* --- encoding -------------------------------------------------------------------- */
+/* --- encoding --- */
 
 void f_build_init(f_builder *b, u8 *buf, int cap) {
   b->buf = buf;
@@ -257,7 +253,7 @@ int f_encode(u8 type, const u8 *payload, int len, u8 *out, int cap) {
   out[3] = 0;
   wr32(out + 4, (u32)len);
   copy(out + F_HEADER, payload, len);
-  /* Covers everything but the sync word, which is a marker rather than data. */
+  /* covers everything but the sync word, which is a marker rather than data */
   wr32(out + F_HEADER + len, f_crc32(out + 2, F_HEADER - 2 + len));
   return total;
 }
