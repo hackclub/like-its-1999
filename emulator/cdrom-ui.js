@@ -37,6 +37,9 @@ export function createCdromControl({
   emulator,
   presets = [],
   setStatus = () => {},
+  // opens the mounted disc in the guest's shell, best-effort: see revealDisc in main.js.
+  // never awaited and never surfaced, since the disc is mounted either way
+  revealDisc = null,
 }) {
   injectStyles()
 
@@ -48,7 +51,7 @@ export function createCdromControl({
   // placeholder it replaces so there's no flicker or layout shift
   let ready = false
   const renderBtn = () => {
-    btn.textContent = mounted ? 'Eject CD' : 'Mount CD'
+    btn.textContent = mounted ? 'Eject disc' : 'Add files...'
     btn.disabled = busy || !ready
   }
   renderBtn()
@@ -67,11 +70,13 @@ export function createCdromControl({
   dialog.innerHTML = `
     <div class="cdrom-body">
       <div class="cdrom-head">
-        <span class="title">Mount CD (E:\\)</span>
+        <span class="title">Add files to the CD drive (E:)</span>
         <button data-close>Close</button>
       </div>
       <div class="cdrom-section" data-files-section>
-        <span class="label">Upload files</span>
+        <span class="label">Add files</span>
+        <span class="hint">They arrive on the CD drive as Imported (E:). Copy them onto
+          the hard disk before you edit them, because E: is read-only.</span>
         <span class="hint">Images: .png, .jpg, .gif (animated), .webp, .bmp</span>
         <span class="hint">Audio: .mp3, .wav, .ogg, .mid</span>
         <span class="hint">Fonts: .ttf, .otf, .woff, .woff2</span>
@@ -180,10 +185,10 @@ export function createCdromControl({
 
   // `prepare` does the slow part (reencoding, or an arrayBuffer() read); `apply` does
   // the emulator.set_cdrom() call, effectively instant for every caller below
-  async function mount(prepare, apply, label) {
+  async function mount(prepare, apply, label, reveal = false) {
     const myGen = ++generation
     setBusy(true)
-    setMsg(`mounting ${label}…`)
+    setMsg(`mounting ${label}...`)
     try {
       const prepared = await prepare()
       if (myGen !== generation) return // superseded, drop this result
@@ -199,6 +204,7 @@ export function createCdromControl({
       mounted = true
       setStatus(`mounted ${label}`)
       dialog.close()
+      if (reveal && revealDisc) revealDisc()
     } catch (e) {
       if (myGen !== generation) return // don't report a stale error over a newer action
       mounted = false
@@ -216,7 +222,8 @@ export function createCdromControl({
     mount(
       () => prepareFiles(files),
       (iso) => emulator.set_cdrom({ buffer: iso.buffer }),
-      `${files.length} file(s)`
+      `${files.length} file(s)`,
+      true
     )
   })
 

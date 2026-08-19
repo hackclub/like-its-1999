@@ -201,7 +201,7 @@ export function createFileBrowser({
     btn.onclick = async (ev) => {
       ev.stopPropagation() // don't also navigate into the folder
       btn.disabled = true
-      setMsg((isDir ? 'Zipping ' : 'Downloading ') + basename(path) + ' …')
+      setMsg((isDir ? 'Zipping ' : 'Downloading ') + basename(path) + ' ...')
       try {
         await download(path, isDir, await diskList[activeIdx].get())
         setMsg('Done.')
@@ -217,7 +217,7 @@ export function createFileBrowser({
   async function navigate(path) {
     current = path
     downloadBtn.disabled = true
-    setMsg('Loading…')
+    setMsg('Loading...')
     renderCrumbs()
     list.replaceChildren()
     let entries
@@ -256,7 +256,7 @@ export function createFileBrowser({
 
   downloadBtn.onclick = async () => {
     downloadBtn.disabled = true
-    setMsg('Packaging ' + current + ' …')
+    setMsg('Packaging ' + current + ' ...')
     try {
       await download(current, true, await diskList[activeIdx].get())
       setMsg('Done.')

@@ -29,6 +29,19 @@
       body.fs #toolbar {
         display: none;
       }
+      /* buttons do not inherit the page font and a select does, so left alone the two
+         disagree on both font and height. state both explicitly so the world switch is
+         the same size as the buttons it sits next to */
+      #toolbar button,
+      #toolbar select {
+        font:
+          13px Arial,
+          Helvetica,
+          sans-serif;
+        height: 22px;
+        padding: 0 6px;
+        box-sizing: border-box;
+      }
       #shared-badge {
         color: #000;
         background: #ffcc00;
@@ -66,18 +79,19 @@
   </head>
   <body>
     <div id="toolbar">
+      <span id="world-slot" hidden></span>
       <button id="fullscreen" type="button">Fullscreen</button>
       <button id="save" type="button">Save</button>
       <button id="screenshot" type="button">Screenshot</button>
-      <button id="export" type="button">Export</button>
-      <button id="import-btn" type="button">Import</button>
+      <button id="export" type="button">Download machine</button>
+      <button id="import-btn" type="button">Load machine...</button>
       <input id="import" type="file" accept=".gz,.bin" hidden />
-      <button id="browse" type="button">Browse files</button>
-      <button id="cdrom-slot" type="button" disabled>Mount CD</button>
-      <button id="reboot" type="button">Force Reboot</button>
+      <button id="browse" type="button">Browse files...</button>
+      <button id="cdrom-slot" type="button" disabled>Add files...</button>
+      <button id="reboot" type="button">Force reboot</button>
       <button id="reset" type="button">Reset</button>
       <span id="shared-badge" hidden>shared</span>
-      <span id="status">initializing…</span>
+      <span id="status">initializing...</span>
     </div>
     <div id="screen_holder">
       <div id="screen_container">

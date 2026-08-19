@@ -52,7 +52,7 @@ export const WORLDS = new Map([
     LEGACY_WORLD_ID,
     {
       id: LEGACY_WORLD_ID,
-      label: "Windows 98 SE — Like It's 1999 v1",
+      label: "Windows 98 SE (Like It's 1999 v1)",
       memory: 128 * MiB,
       vgaMemory: 32 * MiB, // matches the VBEMP 032MB True Color driver
       uart1: false,
@@ -75,7 +75,7 @@ export const WORLDS = new Map([
     V2_WORLD_ID,
     {
       id: V2_WORLD_ID,
-      label: "Windows 98 SE — Like It's 1999 v2",
+      label: "Windows 98 SE (Like It's 1999 v2)",
       // identical machine to v1 on purpose: the disks got bigger, the hardware did not
       memory: 128 * MiB,
       vgaMemory: 32 * MiB,
@@ -97,7 +97,9 @@ export const WORLDS = new Map([
   ],
 ])
 
-const CURRENT_WORLD_ID = V2_WORLD_ID
+// exported so the toolbar's world switch can tell which option is the canonical one
+// without hardcoding a version that goes stale the next time this moves
+export const CURRENT_WORLD_ID = V2_WORLD_ID
 
 // locally there is no CDN, so rewrite a registered world's pinned URLs onto the dev base
 function forDev(world) {
@@ -255,7 +257,7 @@ export function resolveWorld(desc, opts = {}) {
   // rebuilt image. only currentWorld() may mint dev worlds, by measuring
   if (isDevWorldId(id))
     throw new Error(
-      `"${String(id).slice(0, 64)}" is a local build's world — it can only be opened ` +
+      `"${String(id).slice(0, 64)}" is a local build's world; it can only be opened ` +
         'on the machine that made it, against the same image'
     )
   return { ...validateWorld(desc, opts), resolvable: false }

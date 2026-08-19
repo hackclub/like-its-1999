@@ -139,6 +139,10 @@ test('a first save creates the slot and indexes it', async () => {
     listed.map((s) => s.worldId),
     [legacyWorld.id]
   )
+  // the toolbar's world switch labels an entry from these two without touching the
+  // record, so both have to survive the index round trip
+  assert.equal(listed[0].size, rec.bytes.length)
+  assert.ok(listed[0].at > 0)
 })
 
 test('generations advance and a stale write is refused without changing anything', async () => {

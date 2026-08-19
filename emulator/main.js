@@ -41,6 +41,7 @@ import {
 import { sha256hex } from './savefile.js'
 import { createFileBrowser, openLiveFs } from './vmfs/filebrowser.js'
 import { createCdromControl } from './cdrom-ui.js'
+import { createWorldSwitch } from './world-switch.js'
 import { installAtapiCdromFix } from './cdrom-atapi-fix.js'
 
 // custom win98 image (built in tmp-image-build/, checkpoint 03): C: (hda) is win98 se
@@ -67,7 +68,7 @@ const instanceId = crypto.randomUUID()
 let shared = null
 if (params.share) {
   try {
-    setStatus('loading shared machine…')
+    setStatus('loading shared machine...')
     shared = await fetchSharedSave(params.share)
   } catch (e) {
     console.error('shared machine failed to load:', e)
@@ -93,11 +94,10 @@ if (!world) {
 }
 
 const saved = isShared || params.fresh ? null : await loadSavedSession(world)
-// the index, not the records: this only needs to know which other slots exist
-const slots =
-  !saved && !isShared && (params.fresh || isDevWorldId(world.id))
-    ? await listSavedWorlds()
-    : []
+// the index, not the records: which slots exist, when they were written and how big they
+// are. read on every non-shared boot because the world switch needs it too, not just the
+// two planBoot flags below
+const slots = isShared ? [] : await listSavedWorlds()
 const plan = planBoot({
   params,
   shared,
@@ -159,7 +159,7 @@ const emulator = new V86({
 let running = false
 emulator.add_listener(
   'emulator-loaded',
-  () => !running && setStatus('booting…')
+  () => !running && setStatus('booting...')
 )
 emulator.add_listener('emulator-started', () => {
   running = true
@@ -168,7 +168,7 @@ emulator.add_listener('emulator-started', () => {
 emulator.add_listener('download-progress', (e) => {
   if (running || !e.file_name || !e.total) return
   setStatus(
-    `downloading ${e.file_name} — ${Math.round((100 * e.loaded) / e.total)}%`
+    `downloading ${e.file_name}: ${Math.round((100 * e.loaded) / e.total)}%`
   )
 })
 
@@ -449,14 +449,14 @@ async function doSave(label = 'saved', { auto = false, force = false } = {}) {
   } catch (e) {
     if (e instanceof StorageFullError) {
       console.warn(e.message)
-      setStatus('out of browser storage — export to a file')
+      setStatus('out of browser storage; download the machine to a file')
       alert(e.message)
       return
     }
     if (e instanceof StaleSaveError) {
       // another tab owns this machine now; winning silently would discard its work
       console.warn(e.message)
-      setStatus('another tab saved this machine — reload to continue here')
+      setStatus('another tab saved this machine; reload to continue here')
       return
     }
     console.error(e)
@@ -493,10 +493,10 @@ $('save')?.addEventListener('click', () => {
 $('export')?.addEventListener('click', async () => {
   try {
     const bytes = await exportSession(emulator, await saveOptions())
-    setStatus(`exported ${clock()} · ${(bytes / 1e6).toFixed(1)} MB`)
+    setStatus(`downloaded ${clock()} · ${(bytes / 1e6).toFixed(1)} MB`)
   } catch (e) {
     console.error(e)
-    setStatus('export failed')
+    setStatus('download failed')
   }
 })
 
@@ -549,7 +549,7 @@ $('import-btn')?.addEventListener('click', () => $('import')?.click())
 $('import')?.addEventListener('change', async (e) => {
   const file = e.target.files?.[0]
   if (!file) return
-  setStatus('importing…')
+  setStatus('loading machine...')
   try {
     // read first, then ask: the file names its own world, which may not be the one
     // running, so only now can we say what would be replaced
@@ -566,7 +566,7 @@ $('import')?.addEventListener('change', async (e) => {
           '.\n\nThat cannot be undone. Continue?'
       )
     ) {
-      setStatus('import cancelled')
+      setStatus('loading cancelled')
       e.target.value = ''
       return
     }
@@ -575,7 +575,7 @@ $('import')?.addEventListener('change', async (e) => {
     // world cannot be applied live: store it and reload into that world
     if (verdict.needsReload) {
       await storeImport(imported)
-      setStatus(`imported a ${imported.world.label} machine — reloading…`)
+      setStatus(`loaded a ${imported.world.label} machine, reloading...`)
       const url = new URL(location.href)
       url.searchParams.delete('share')
       url.searchParams.delete('fresh')
@@ -592,12 +592,12 @@ $('import')?.addEventListener('change', async (e) => {
         gen: params.nosave ? null : await storeImport(imported),
       })
     )
-    setStatus(`imported ${clock()}`)
+    setStatus(`loaded ${clock()}`)
   } catch (err) {
     console.error(err)
     setStatus(
       err instanceof StaleSaveError
-        ? 'that machine was saved in another tab — reload and try again'
+        ? 'that machine was saved in another tab; reload and try again'
         : `import failed: ${err.message}`
     )
   }
@@ -645,9 +645,34 @@ const PRESETS = [
   },
 ]
 
+// after an "Add files" mount, open the disc in the guest so nobody has to be told where
+// their files went. participants read neither the dialog nor the status line, so the only
+// reliable instruction is not to need one
+//
+// deliberately narrow: one fixed command, never a caller-supplied path, and a module-local
+// call rather than an addition to the debug surface, which still ships with no exec at all
+// (debug.js). `start` hands the child off to the shell so this returns immediately instead
+// of blocking until explorer exits and tripping the agent's child-write deadline
+//
+// best-effort by design: v1 machines and ?fresh=1 cold boots have no agent, and the disc is
+// mounted either way, so a failure here is silent rather than an error nobody can act on
+const revealDisc = () => {
+  if (link.state !== 'ready') return
+  link.call('exec', ['start explorer E:\\']).catch(() => {})
+}
+
 $('cdrom-slot')?.replaceWith(
-  createCdromControl({ emulator, presets: PRESETS, setStatus })
+  createCdromControl({ emulator, presets: PRESETS, setStatus, revealDisc })
 )
+
+// null unless there is a genuine choice, which on a shared machine there never is: slots
+// is empty there, so the only option is the world already running
+const worldSwitch = createWorldSwitch({
+  world,
+  slots,
+  saveFirst: () => doSave('saved'),
+})
+if (worldSwitch) $('world-slot')?.replaceWith(worldSwitch)
 
 // power-cycles the pc: the disks (C:, D:, and whatever is in the cd-rom drive) survive
 //

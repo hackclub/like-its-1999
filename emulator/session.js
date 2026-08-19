@@ -71,7 +71,7 @@ export function planBoot({
       source: 'cold',
       gen: null,
       blocked: storedElsewhere
-        ? 'started fresh — click Save to replace the machine stored here'
+        ? 'started fresh; click Save to replace the machine stored here'
         : null,
       note: [worldNote, freshNote].filter(Boolean).join(' · '),
     }
@@ -83,7 +83,7 @@ export function planBoot({
     // phrased as a refusal because it is shown as one, in the toolbar and in the confirm
     // dialog when the user insists
     plan.blocked = `this build cannot read the machine saved here (${saved.reason})`
-    plan.note = 'existing save not readable — not overwriting it'
+    plan.note = 'existing save not readable; not overwriting it'
   } else if (saved) {
     plan.source = 'saved'
     plan.prior = saved.save
@@ -92,7 +92,7 @@ export function planBoot({
   } else if (otherDevSaves) {
     // locally a world id is a fingerprint of the image bytes, so "nothing saved for this
     // world" plus "something saved for another" means the image was rebuilt underneath
-    plan.note = 'image changed — booting fresh'
+    plan.note = 'image changed, booting fresh'
   }
 
   // a snapshot older than the disks beside it would paint the previous build's RAM over
@@ -100,7 +100,7 @@ export function planBoot({
   if (plan.source === 'snapshot') {
     if (world.snapshotIsStale) {
       plan.source = 'cold'
-      plan.note = 'snapshot older than disks — cold booting'
+      plan.note = 'snapshot older than disks, cold booting'
     } else if (!world.initialState) {
       plan.source = 'cold'
     }
@@ -174,7 +174,7 @@ export function planImport({ imported, params = {} } = {}) {
       replaces,
       needsReload,
       refuse:
-        `that machine belongs to ${world.label}, which needs saving to open — ` +
+        `that machine belongs to ${world.label}, which needs saving to open, ` +
         'not possible with ?nosave=1',
     }
   // a cross-world import is stored and then reloaded into with ?world=<id>, which only

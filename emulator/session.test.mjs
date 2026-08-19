@@ -163,7 +163,7 @@ test('a rebuilt local image is reported rather than looking like a lost save', (
     world: noSnapshot,
     otherDevSaves: true,
   })
-  assert.equal(rebuilt.note, 'image changed — booting fresh')
+  assert.equal(rebuilt.note, 'image changed, booting fresh')
 })
 
 test('cold boots when there is no snapshot, or the snapshot is older than the disks', () => {
@@ -171,7 +171,7 @@ test('cold boots when there is no snapshot, or the snapshot is older than the di
 
   const stale = planBoot({ world: staleSnapshot })
   assert.equal(stale.source, 'cold')
-  assert.equal(stale.note, 'snapshot older than disks — cold booting')
+  assert.equal(stale.note, 'snapshot older than disks, cold booting')
 
   const restored = planBoot({ saved: stored(), world: staleSnapshot })
   assert.equal(restored.source, 'saved')
@@ -197,7 +197,7 @@ test('a world-resolution message survives to the toolbar', () => {
     otherDevSaves: true,
     worldNote: 'unknown world "x"',
   })
-  assert.equal(rebuilt.note, 'image changed — booting fresh')
+  assert.equal(rebuilt.note, 'image changed, booting fresh')
 })
 
 test('planBoot always returns a known source and never throws on sparse input', () => {
