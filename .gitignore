@@ -3,15 +3,10 @@ dist/
 .DS_Store
 *.log
 
-.env
-.env.local
-.env.*.local
-
 # Large VM assets
 *.img
 *.iso
 *.bin.zst
-emulator/images/
 public/images/
 public/vm/
 
@@ -24,5 +19,3 @@ emulator/daemon/build/
 .env*
 .vercel
 public/vm-v2/
-public/vm-fmt/
-public/vm-newc/

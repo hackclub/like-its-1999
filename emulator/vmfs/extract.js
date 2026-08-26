@@ -6,7 +6,7 @@ import { parseState, maybeGunzip } from './state.js'
 import { detectFormat, readSaveFile } from '../savefile.js'
 import { OverlayBlockDevice } from './blockdev.js'
 import { FatFs } from './fat.js'
-import { zipTree, zipFiles } from './zip.js'
+import { zipTree } from './zip.js'
 
 // a saved machine is either a .99sv container or the raw/gzipped v86 state that every
 // v1 save and published share link is
@@ -49,11 +49,6 @@ export async function openStateFs(stateBytes, baseSource, opts = {}) {
 export async function exportDirZip(fs, path, opts = {}) {
   const tree = await fs.walk(path)
   return zipTree(fs, tree, opts)
-}
-
-// flat zip, no directory structure
-export async function exportFilesZip(fs, paths, opts = {}) {
-  return zipFiles(fs, paths, opts)
 }
 
 // node CLI: <state> is a .99sv container or a raw/gzipped v86 state, <base> is the

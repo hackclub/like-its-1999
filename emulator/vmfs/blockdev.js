@@ -100,31 +100,6 @@ export async function nodeFileSource(path) {
   }
 }
 
-// BaseSource over an HTTP URL that supports Range requests; size comes from the first
-// response's Content-Range if not passed in
-export function httpRangeSource(url, knownSize) {
-  let size = knownSize ?? null
-  return {
-    get size() {
-      return size
-    },
-    async readRange(offset, length) {
-      const end = offset + length - 1
-      const res = await fetch(url, {
-        headers: { Range: `bytes=${offset}-${end}` },
-      })
-      if (res.status !== 206 && res.status !== 200)
-        throw new Error(`range fetch failed: HTTP ${res.status} for ${url}`)
-      if (size == null) {
-        const cr = res.headers.get('content-range')
-        const m = cr && /\/(\d+)$/.exec(cr)
-        if (m) size = parseInt(m[1], 10)
-      }
-      return new Uint8Array(await res.arrayBuffer())
-    },
-  }
-}
-
 // device over a running v86 emulator's disk buffer, e.g.
 // emulator.v86.cpu.devices.ide.primary.master.buffer for C:. buffer.get() already
 // merges the guest's writes over the base and reuses v86's chunk cache, so this needs
@@ -142,17 +117,6 @@ export function v86Device(buffer, size = buffer.byteLength) {
           resolve(data.subarray(from, from + length))
         })
       })
-    },
-  }
-}
-
-// BaseSource over an in-memory buffer
-export function bufferSource(buffer) {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer)
-  return {
-    size: bytes.length,
-    async readRange(offset, length) {
-      return bytes.subarray(offset, offset + length)
     },
   }
 }

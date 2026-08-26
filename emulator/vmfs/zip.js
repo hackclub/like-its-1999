@@ -15,12 +15,3 @@ export async function zipTree(fs, tree, { compress = true } = {}) {
   await add(tree, rootName)
   return zipSync(files, { level: compress ? 6 : 0 })
 }
-
-// flat: names collapse to their basename, no directory structure
-export async function zipFiles(fs, paths, { compress = true } = {}) {
-  const files = {}
-  for (const p of paths) {
-    files[p.split('/').filter(Boolean).pop()] = await fs.readFile(p)
-  }
-  return zipSync(files, { level: compress ? 6 : 0 })
-}
