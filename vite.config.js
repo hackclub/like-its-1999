@@ -1,6 +1,40 @@
 import { resolve } from 'node:path'
 import { defineConfig, loadEnv } from 'vite'
 
+// Serve /submit and /api/submit/* locally, which vercel.json and api/submit/[path].js
+// handle in production.
+function ferryRoutes(env) {
+  return {
+    name: 'local-ferry-routes',
+    apply: 'serve',
+    configureServer(server) {
+      // The handler reads its config from the environment, exactly as it does on Vercel.
+      for (const [k, v] of Object.entries(env))
+        if (k.startsWith('FERRY_') && !process.env[k]) process.env[k] = v
+
+      // Loaded on first hit, not here: registering the middleware synchronously keeps it
+      // ahead of Vite's own, and awaiting in configureServer would not.
+      let middleware
+      server.middlewares.use(async (req, res, next) => {
+        const path = (req.url || '').split('?')[0]
+
+        if (path === '/submit') {
+          res.statusCode = 302
+          res.setHeader('location', '/api/submit/start')
+          return res.end()
+        }
+        if (!path.startsWith('/api/submit')) return next()
+
+        if (!middleware) {
+          const mod = await server.ssrLoadModule('./api/submit/[path].js')
+          middleware = mod.ferry.middleware()
+        }
+        middleware(req, res, next)
+      })
+    },
+  }
+}
+
 // Serve `api/` locally, the way Vercel serves it in production.
 //
 // Without this, /api/sign simply does not exist under `npm run dev`: the tracking log gets
@@ -73,7 +107,10 @@ function apiRoutes(env) {
 export default defineConfig(({ mode }) => ({
   // Every variable, not only VITE_ ones: this runs in Node inside the config, and none of it
   // is handed to the client.
-  plugins: [apiRoutes(loadEnv(mode, process.cwd(), ''))],
+  plugins: [
+    ferryRoutes(loadEnv(mode, process.cwd(), '')),
+    apiRoutes(loadEnv(mode, process.cwd(), '')),
+  ],
   server: {
     // v86 fetches disk chunks with HTTP Range requests; Vite's static server handles these.
     fs: { allow: ['.'] },

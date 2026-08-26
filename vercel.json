@@ -1,0 +1,6 @@
+{
+  "redirects": [
+    { "source": "/submit", "destination": "/api/submit/start" },
+    { "source": "/api/submit", "destination": "/api/submit/start" }
+  ]
+}
