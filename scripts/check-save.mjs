@@ -46,9 +46,11 @@ const PROGRAMS = {
   'TCLSH80.EXE': ['tclsh', 'code'],
   'SQUEAK.EXE': ['Squeak', 'code'],
   'REBOL.EXE': ['REBOL/Core', 'code'],
+  'GAME MAKER.EXE': ['Game Maker', 'code'],
   'MAKER.EXE': ['Game Maker', 'code'],
   'QBASIC.EXE': ['QBasic', 'code'],
   'PSP.EXE': ['Paint Shop Pro 6', 'asset'],
+  'ANIM.EXE': ['Animation Shop 2', 'asset'],
   'ANIMSHOP.EXE': ['Animation Shop 2', 'asset'],
   'GIFCON32.EXE': ['GIF Construction Set', 'asset'],
   'FLASH.EXE': ['Flash 4', 'asset'],
@@ -66,6 +68,7 @@ const PROGRAMS = {
   'WINZIP32.EXE': ['WinZip', 'files'],
   'WINFILE.EXE': ['File Manager', 'files'],
   'COMMAND.COM': ['MS-DOS Prompt', 'shell'],
+  'WINOA386.MOD': ['MS-DOS Prompt', 'shell'],
   'WINOLDAP.MOD': ['MS-DOS Prompt', 'shell'],
   'CONAGENT.EXE': ['MS-DOS Prompt', 'shell'],
   'WORDPAD.EXE': ['WordPad', 'other'],
@@ -80,6 +83,11 @@ const PROGRAMS = {
   'RUNDLL32.EXE': ['Control Panel applet', 'other'],
   'CONTROL.EXE': ['Control Panel', 'other'],
   'WS_FTP.EXE': ['WS_FTP LE', 'other'],
+  'MSIMN.EXE': ['Outlook Express', 'other'],
+  'MSINFO32.EXE': ['System Information', 'other'],
+  'TASKMAN.EXE': ['Task Manager', 'other'],
+  'WINHLP32.EXE': ['Windows Help', 'other'],
+  'SYSMON.EXE': ['System Monitor', 'other'],
 }
 
 // longest first, so "Microsoft Internet Explorer" wins over a shorter match
@@ -344,9 +352,7 @@ for (const inst of instances) {
 }
 console.log()
 console.log(
-  failures
-    ? `  ${failures} check(s) FAILED.`
-    : '  every check passed.'
+  failures ? `  ${failures} check(s) FAILED.` : '  every check passed.'
 )
 
 rule('when the server vouched for these bytes')
