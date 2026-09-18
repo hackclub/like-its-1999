@@ -2,6 +2,7 @@
 //
 //   node scripts/check-save.mjs <file.99sv>
 //   HB_KEY=<base64> node scripts/check-save.mjs <file.99sv>
+//   ...or put the key in hb-key.txt in the repo root and just run the first form
 //
 // written for someone spot-checking a submission, so it runs from a clean clone with no
 // npm install and no key. the two halves are deliberately separate:
@@ -15,6 +16,7 @@
 // Windows 98 session, meaning someone's file names and paths, and a save is a public URL
 
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import { createHash, createPublicKey, verify as edVerify } from 'node:crypto'
 import { gunzipSync } from 'node:zlib'
 
@@ -28,7 +30,7 @@ const SIGN_PUBLIC_KEY_B64 =
   'MCowBQYDK2VwAyEAhMtVECEzetNtvcFBcSW97FmikEwHU7zQEYBYrdXDdm4='
 
 const SESSION_GAP_MS = 15 * 60 * 1000
-const ASSET_CAP = 0.25
+const ASSET_CAP = 0.3
 // the signature clock is the server's, the line clock is the participant's browser
 const CLOCK_SKEW_S = 120
 
@@ -178,6 +180,47 @@ const rule = (label) => {
   console.log('-'.repeat(label.length))
 }
 
+// the key is 184 characters, too long to retype and awkward to paste into a shell, so a
+// file beside the script works as well as the env var. a JSON file is read as the key
+// bundle scripts/hb-keys.mjs writes, anything else as the bare base64
+const KEY_FILES = ['hb-key.txt', 'tmp-hb-keys.json']
+
+async function loadKey() {
+  const env = process.env.HB_KEY?.trim()
+  if (env) return { rawKey: env, keyFrom: 'HB_KEY' }
+
+  const here = new URL('.', import.meta.url)
+  const candidates = [
+    process.env.HB_KEY_FILE,
+    ...KEY_FILES.flatMap((name) => [name, new URL('../' + name, here)]),
+  ].filter(Boolean)
+
+  for (const candidate of candidates) {
+    let text
+    try {
+      text = (await readFile(candidate, 'utf8')).trim()
+    } catch {
+      continue
+    }
+    if (!text) continue
+    const label =
+      typeof candidate === 'string' ? candidate : fileURLToPath(candidate)
+    if (text.startsWith('{')) {
+      try {
+        const json = JSON.parse(text)
+        const key =
+          json.sealPrivate_offlineOnly || json.sealPrivate || json.seal
+        if (key) return { rawKey: String(key).trim(), keyFrom: label }
+      } catch {
+        continue
+      }
+      continue
+    }
+    return { rawKey: text, keyFrom: label }
+  }
+  return { rawKey: null, keyFrom: null }
+}
+
 // ---------------------------------------------------------------- open and verify
 
 const file = process.argv[2]
@@ -186,6 +229,10 @@ if (!file || file === '--help' || file === '-h') {
 
   node scripts/check-save.mjs <file.99sv>              verify the log is intact
   HB_KEY=<base64> node scripts/check-save.mjs <file>   and summarise the activity
+
+The key is long, so instead of the env var you can save it to hb-key.txt in the repo
+root and run the plain form. Searched in order: $HB_KEY, $HB_KEY_FILE, hb-key.txt and
+tmp-hb-keys.json in the working directory, then the same two in the repo root.
 
 Verification needs no key: the countersignature is over the ciphertext, so anyone can
 confirm the log was not edited and that the signing server vouched for it. Reading the
@@ -284,7 +331,7 @@ for (const entry of chunks) {
 
 // ---------------------------------------------------------------- unseal, if we can
 
-const rawKey = process.env.HB_KEY?.trim()
+const { rawKey, keyFrom } = await loadKey()
 let keyNote = null
 
 if (rawKey) {
@@ -292,7 +339,7 @@ if (rawKey) {
   try {
     priv = await importPrivateKey(rawKey)
   } catch (e) {
-    keyNote = `HB_KEY will not import: ${e.message}`
+    keyNote = `the key in ${keyFrom} will not import: ${e.message}`
   }
   if (priv) {
     for (const inst of instances) {
@@ -334,7 +381,7 @@ if (rawKey) {
   }
 } else {
   keyNote =
-    'HB_KEY is not set, so the log stays sealed and only integrity was checked.'
+    'no key found, so the log stays sealed and only integrity was checked. set HB_KEY or put the key in hb-key.txt'
 }
 
 // ---------------------------------------------------------------- integrity report
@@ -478,7 +525,7 @@ let approvable = totalMs
 if (assetMs > totalMs * ASSET_CAP) {
   approvable = otherMs / (1 - ASSET_CAP)
   console.log(
-    `  over the ${ASSET_CAP * 100}% art cap. the largest total that stays inside it is`
+    `  over the ${Math.round(ASSET_CAP * 100)}% art cap. the largest total that stays inside it is`
   )
   console.log(
     `  non-asset / 0.75   ${dur(otherMs)} / 0.75 = ${dur(approvable)}`
@@ -488,7 +535,7 @@ if (assetMs > totalMs * ASSET_CAP) {
   )
 } else {
   console.log(
-    `  inside the ${ASSET_CAP * 100}% art cap, so the cap does not reduce anything.`
+    `  inside the ${Math.round(ASSET_CAP * 100)}% art cap, so the cap does not reduce anything.`
   )
 }
 console.log()

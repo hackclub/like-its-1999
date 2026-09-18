@@ -103,7 +103,7 @@ for (const entry of logs) {
   console.error(`lines: ${lines.length}, spans: ${spans.length}, keys: ${keys}`)
   for (const [exe, ms] of [...byExe].sort((a, b) => b[1] - a[1]))
     console.error(`  ${exe.padEnd(16)} ${mins(ms)}`)
-  // No hours: the tally applies a policy (idle, coding vs asset, the 25% cap) and does not
+  // No hours: the tally applies a policy (idle, coding vs asset, the 30% cap) and does not
   // live here.
 }
 

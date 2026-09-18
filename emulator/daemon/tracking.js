@@ -1,7 +1,7 @@
 // the tracking log: what the machine was doing, recorded so hours can be worked out later
 //
 // it deliberately computes no hours. it records spans, input counts and gaps with enough
-// fidelity that any policy (idle timeout, coding versus asset attribution, the 25% asset
+// fidelity that any policy (idle timeout, coding versus asset attribution, the 30% asset
 // cap) can be applied afterwards, and deciding the policy now would bake a guess into data
 // we cannot re-gather
 //
